@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
-# Version 15: Corrected dtype/precision for ResourceGrid and GenerateOFDMChannel.
+# Version 17: Corrected NameError in compute_metrics_tf.
+#             User MUST ensure they are using a GPU-enabled Docker container where TensorFlow can see the GPUs.
 
+# --- Imports ---
 import sionna
 import tensorflow as tf
 import numpy as np
@@ -9,97 +11,106 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import time
-import pickle
 from collections import Counter
 
-# --- Sionna specific imports ---
+# --- Sionna specific imports for channel modeling ---
 from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
 from sionna.phy.ofdm import ResourceGrid
-from sionna.phy.channel import OFDMChannel
+from sionna.phy.channel import GenerateOFDMChannel # Using GenerateOFDMChannel directly
+
 
 # --- Global Constants ---
 NUM_CELLS = 3
 NUM_UES = 30
-BANDWIDTH = 20e6
-CARRIER_FREQUENCY = 3.5e9
-TX_POWER_DBM = 30
-NOISE_POWER_DBM_PER_HZ = -174
+BANDWIDTH = 20e6  # 20 MHz
+CARRIER_FREQUENCY = 3.5e9  # 3.5 GHz
+TX_POWER_DBM = 30  # dBm
+NOISE_POWER_DBM_PER_HZ = -174  # dBm/Hz
+
+# Start with VERY low iterations for testing these major changes
 SIMULATION_ITERATIONS = 2
 FUZZER_GENERATIONS = 2
 FUZZER_POPULATION = 2
-ENABLE_DETAILED_METRIC_PRINT = True  # Enabled for debugging
+
+ENABLE_DETAILED_METRIC_PRINT = True 
+ENABLE_TF_DEVICE_LOGGING = False
+
 
 # --- Module 1: Network Simulation Environment ---
 class NetworkEnvironment:
     def __init__(self, initial_load=0.3):
-        self.batch_size = 4
+        # print(f"Initializing NetworkEnvironment with Full OFDM Channel (v17) and load: {initial_load}")
+        self.batch_size = 1
+
         self.ut_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
                                    polarization='single', polarization_type='V',
-                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY)
-        self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
+                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
+                                   precision="single")
+        self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1, 
                                    polarization='single', polarization_type='V',
-                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY)
-
+                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
+                                   precision="single")
+        
         try:
             self.channel_model_3gpp = UMi(
-                carrier_frequency=CARRIER_FREQUENCY,
-                o2i_model='low',
-                ut_array=self.ut_array,
-                bs_array=self.bs_array,
-                direction='downlink',
-                enable_pathloss=True,
-                enable_shadow_fading=True,
-                always_generate_lsp=True
+                carrier_frequency=CARRIER_FREQUENCY, o2i_model='low',
+                ut_array=self.ut_array, bs_array=self.bs_array,
+                direction='downlink', 
+                enable_pathloss=True, enable_shadow_fading=True,
+                always_generate_lsp=True, 
+                precision="single"
             )
         except Exception as e:
             print(f"CRITICAL ERROR instantiating Sionna UMi model: {e}")
             raise
 
         self.resource_grid = ResourceGrid(
-            num_ofdm_symbols=14,
-            fft_size=128,
+            num_ofdm_symbols=14, fft_size=128,
             subcarrier_spacing=30e3,
-            num_tx=NUM_CELLS,
-            num_streams_per_tx=1,
-            cyclic_prefix_length=20,
-            pilot_pattern="kronecker",
+            num_tx=NUM_CELLS, 
+            num_streams_per_tx=1, 
+            cyclic_prefix_length=20, 
+            pilot_pattern="kronecker", 
             pilot_ofdm_symbol_indices=[2, 11],
-            num_guard_carriers=(8, 8),
+            num_guard_carriers=(8, 8), 
             dc_null=True
         )
-
-        if self.channel_model_3gpp:
-            self.ofdm_channel = OFDMChannel(
-                channel_model=self.channel_model_3gpp,
-                resource_grid=self.resource_grid,
-                add_awgn=True,
-                normalize_channel=True,
-                dtype=tf.complex64,
-                num_time_samples=4
-            )
-        else:
-            self.ofdm_channel = None
-
+        
+        self.generate_h_freq_layer = GenerateOFDMChannel(
+            channel_model=self.channel_model_3gpp,
+            resource_grid=self.resource_grid,
+            precision="single" 
+        )
+        
         bs_pos_2d = np.array([[0,0], [100,0], [50, 86.6]]) * 1.0
         self.bs_loc = tf.constant(np.hstack([bs_pos_2d, np.ones((NUM_CELLS, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
+
         ue_pos_2d_np = np.concatenate([
             np.random.uniform(-150, 250, size=(int(NUM_UES * 0.7), 2)),
             np.random.normal([np.mean(bs_pos_2d[:,0]), np.mean(bs_pos_2d[:,1])], 50, size=(int(NUM_UES * 0.3), 2))
         ])
-        # Ensure finite values
         ue_pos_2d_np = np.clip(ue_pos_2d_np, -1e6, 1e6)
         self.ue_loc = tf.Variable(np.hstack([ue_pos_2d_np, np.ones((NUM_UES, 1)) * 1.5])[np.newaxis,...], dtype=tf.float32)
+
         ue_vel_2d_np = np.random.uniform(-1, 1, size=(NUM_UES, 2))
         self.ue_velocities = tf.Variable(np.hstack([ue_vel_2d_np, np.zeros((NUM_UES, 1))])[np.newaxis,...], dtype=tf.float32)
+
         self.ut_orientations = tf.zeros([self.batch_size, NUM_UES, 3], dtype=tf.float32)
         self.bs_orientations = tf.zeros([self.batch_size, NUM_CELLS, 3], dtype=tf.float32)
         self.in_state = tf.zeros([self.batch_size, NUM_UES], dtype=tf.bool)
+
         self.cell_loads = np.ones(NUM_CELLS) * initial_load
         self.initial_load = initial_load
         self.ue_priorities = np.random.choice([1, 2, 3], size=NUM_UES, p=[0.3, 0.4, 0.3]).astype(np.float32)
 
         self.noise_power_watts = 10**((NOISE_POWER_DBM_PER_HZ - 30) / 10) * BANDWIDTH
-        self.tx_power_watts = 10**((TX_POWER_DBM - 30) / 10)
+        self.tx_power_watts_total = 10**((TX_POWER_DBM - 30) / 10)
+        
+        num_effective_sc = self.resource_grid.num_effective_subcarriers
+        self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / tf.cast(num_effective_sc, tf.float32)
+        
+        # print("NetworkEnvironment Initialized (Full OFDM Channel v17).")
+
 
     def update_ue_positions_and_velocities(self, dt=1.0, max_speed=5):
         new_velocities = self.ue_velocities + tf.random.normal(shape=self.ue_velocities.shape, stddev=1.0, dtype=tf.float32) * dt
@@ -109,147 +120,124 @@ class NetworkEnvironment:
         new_velocities = new_velocities * scale
         new_velocities = tf.where(tf.math.is_finite(new_velocities), new_velocities, tf.zeros_like(new_velocities))
         self.ue_velocities.assign(new_velocities)
-
         new_loc = self.ue_loc + new_velocities * dt
         new_loc = tf.where(tf.math.is_finite(new_loc), new_loc, self.ue_loc)
         self.ue_loc.assign(new_loc)
-
         ue_loc_np = self.ue_loc.numpy()[0]
         ue_vel_np = self.ue_velocities.numpy()[0]
-        min_x, max_x = -200.0, 300.0
-        min_y, max_y = -200.0, 250.0
-        hit_x_min = ue_loc_np[:, 0] <= min_x
-        hit_x_max = ue_loc_np[:, 0] >= max_x
-        hit_y_min = ue_loc_np[:, 1] <= min_y
-        hit_y_max = ue_loc_np[:, 1] >= max_y
-        ue_loc_np[hit_x_min, 0] = min_x
-        ue_loc_np[hit_x_max, 0] = max_x
-        ue_loc_np[hit_y_min, 1] = min_y
-        ue_loc_np[hit_y_max, 1] = max_y
+        min_x, max_x = -200.0, 300.0; min_y, max_y = -200.0, 250.0
+        hit_x_min = ue_loc_np[:, 0] <= min_x; hit_x_max = ue_loc_np[:, 0] >= max_x
+        hit_y_min = ue_loc_np[:, 1] <= min_y; hit_y_max = ue_loc_np[:, 1] >= max_y
+        ue_loc_np[hit_x_min, 0] = min_x; ue_loc_np[hit_x_max, 0] = max_x
+        ue_loc_np[hit_y_min, 1] = min_y; ue_loc_np[hit_y_max, 1] = max_y
         ue_vel_np[hit_x_min | hit_x_max, 0] *= -1
         ue_vel_np[hit_y_min | hit_y_max, 1] *= -1
-        ue_loc_np = np.where(np.isfinite(ue_loc_np), ue_loc_np, 0.0)
+        ue_loc_np = np.where(np.isfinite(ue_loc_np), ue_loc_np, 0.0) 
         ue_vel_np = np.where(np.isfinite(ue_vel_np), ue_vel_np, 0.0)
         self.ue_loc.assign(ue_loc_np[np.newaxis,...])
         self.ue_velocities.assign(ue_vel_np[np.newaxis,...])
 
     @tf.function(jit_compile=True)
-    def compute_metrics(self):
-        try:
-            if not tf.reduce_all(tf.math.is_finite(self.ue_loc)) or not tf.reduce_all(tf.math.is_finite(self.bs_loc)):
-                raise ValueError("Invalid UE or BS locations detected")
-
-            self.channel_model_3gpp.set_topology(
-                ut_loc=self.ue_loc,
-                bs_loc=self.bs_loc,
-                ut_orientations=self.ut_orientations,
-                bs_orientations=self.bs_orientations,
-                ut_velocities=self.ue_velocities,
-                in_state=self.in_state
-            )
-
-            h_freq, tau = self.ofdm_channel(
-                num_time_samples=4,
-                sampling_frequency=self.resource_grid.bandwidth
-            )
-
-            if ENABLE_DETAILED_METRIC_PRINT:
-                print(f"h_freq shape: {h_freq.shape}, expected: [1, {NUM_UES}, 1, {NUM_CELLS}, 1, 14, 128]")
-                print(f"tau shape: {tau.shape}")
-
-            channel_power = tf.reduce_mean(
-                tf.abs(h_freq)**2,
-                axis=[-2, -1]
-            )[0, :, 0, :, 0]
-
-            received_power = self.tx_power_watts * channel_power
-            received_power = tf.where(tf.math.is_finite(received_power), received_power, 0.0)
-            rsrp_db = 10.0 * tf.math.log10(tf.maximum(received_power / 1e-3, 1e-20))
-
-            signal_power = received_power
-            interference = tf.reduce_sum(received_power, axis=1, keepdims=True) - signal_power
-            noise = self.noise_power_watts * tf.ones_like(signal_power)
-            sinr_linear = tf.math.divide_no_nan(signal_power, interference + noise)
-            sinr_db = 10.0 * tf.math.log10(tf.maximum(sinr_linear, 1e-20))
-
-            if ENABLE_DETAILED_METRIC_PRINT and hasattr(self.channel_model_3gpp._lsp, 'sf'):
-                sf_db_tf = tf.transpose(self.channel_model_3gpp._lsp.sf[0], [1, 0])
-                print(f"Shadow Fading: Min={tf.reduce_min(sf_db_tf):.2f}, Max={tf.reduce_max(sf_db_tf):.2f}, Mean={tf.reduce_mean(sf_db_tf):.2f} dB")
-
-            return (
-                rsrp_db.numpy(),
-                sinr_db.numpy(),
-                self.cell_loads.copy(),
-                self.ue_priorities.copy()
-            )
-
-        except tf.errors.InvalidArgumentError as e:
-            print(f"Tensor shape mismatch in compute_metrics: {e}")
-            return (
-                np.full((NUM_UES, NUM_CELLS), -200.0),
-                np.full((NUM_UES, NUM_CELLS), -30.0),
-                self.cell_loads.copy(),
-                self.ue_priorities.copy()
-            )
-        except tf.errors.ResourceExhaustedError as e:
-            print(f"GPU memory exceeded: {e}")
-            return (
-                np.full((NUM_UES, NUM_CELLS), -200.0),
-                np.full((NUM_UES, NUM_CELLS), -30.0),
-                self.cell_loads.copy(),
-                self.ue_priorities.copy()
-            )
-        except Exception as e:
-            print(f"Error in compute_metrics: {e}")
-            return (
-                np.full((NUM_UES, NUM_CELLS), -200.0),
-                np.full((NUM_UES, NUM_CELLS), -30.0),
-                self.cell_loads.copy(),
-                self.ue_priorities.copy()
-            )
+    def compute_metrics_tf(self, ue_loc_tf, bs_loc_tf, ut_orient_tf, bs_orient_tf, ut_vel_tf, in_state_tf):
+        self.channel_model_3gpp.set_topology(
+            ut_loc=ue_loc_tf, bs_loc=bs_loc_tf,
+            ut_orientations=ut_orient_tf, bs_orientations=bs_orient_tf,
+            ut_velocities=ut_vel_tf, in_state=in_state_tf
+        )
+        h_freq = self.generate_h_freq_layer(batch_size=self.batch_size)
         
+        if ENABLE_DETAILED_METRIC_PRINT:
+             tf.print(f"h_freq shape: {tf.shape(h_freq)}")
+
+        h_freq_squeezed = tf.squeeze(h_freq, axis=[2, 4])
+        avg_channel_power_gain = tf.reduce_mean(tf.abs(h_freq_squeezed)**2, axis=[-2, -1])
+        received_power_watts_tf = self.tx_power_watts_total * avg_channel_power_gain
+        received_power_watts_tf = tf.where(tf.math.is_finite(received_power_watts_tf), received_power_watts_tf, tf.zeros_like(received_power_watts_tf))
+
+        rp_ue_cell = received_power_watts_tf[0] # Corrected: Define rp_ue_cell from received_power_watts_tf
+        
+        rsrp_db_tf = 10.0 * (tf.math.log(tf.maximum(rp_ue_cell / 1e-3, 1e-20)) / tf.math.log(10.0))
+        
+        signal_power_ue_cell = rp_ue_cell # Now this is correct
+        total_power_at_ue_u = tf.reduce_sum(rp_ue_cell, axis=1, keepdims=True)
+        interference_ue_cell = total_power_at_ue_u - signal_power_ue_cell
+        noise_ue_cell = self.noise_power_watts * tf.ones_like(signal_power_ue_cell)
+        sinr_linear_tf = tf.math.divide_no_nan(signal_power_ue_cell, interference_ue_cell + noise_ue_cell)
+        sinr_db_tf = 10.0 * (tf.math.log(tf.maximum(sinr_linear_tf, 1e-20)) / tf.math.log(10.0))
+        
+        rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
+        sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
+
+        if ENABLE_DETAILED_METRIC_PRINT:
+            if hasattr(self.channel_model_3gpp, '_lsp') and \
+               self.channel_model_3gpp._lsp is not None and \
+               hasattr(self.channel_model_3gpp._lsp, 'sf'):
+                sf_db_tf_raw = self.channel_model_3gpp._lsp.sf
+                sf_db_tf_transposed = tf.transpose(sf_db_tf_raw[0], [1,0])
+                tf.print(f"SF (from _lsp.sf for debug): Min={tf.reduce_min(sf_db_tf_transposed):.2f}, Max={tf.reduce_max(sf_db_tf_transposed):.2f}, Mean={tf.reduce_mean(sf_db_tf_transposed):.2f} dB")
+            else:
+                tf.print("SF debug: ._lsp or ._lsp.sf attribute not found on channel_model_3gpp.")
+        return rsrp_db_tf, sinr_db_tf
+
+    def compute_metrics(self):
+        if self.channel_model_3gpp is None or self.resource_grid is None or not hasattr(self, 'generate_h_freq_layer'):
+            print("CRITICAL ERROR: Sionna components not initialized for OFDM-based metrics.")
+            return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
+                   self.cell_loads.copy(), self.ue_priorities.copy()
+        try:
+            if not tf.reduce_all(tf.math.is_finite(self.ue_loc)) or \
+               not tf.reduce_all(tf.math.is_finite(self.bs_loc)) or \
+               not tf.reduce_all(tf.math.is_finite(self.ue_velocities)):
+                print("Warning: Invalid UE/BS locations or velocities detected (NaN or Inf). Returning defaults.")
+                if hasattr(self, '_last_rsrp_db') and hasattr(self, '_last_sinr_db'):
+                    return self._last_rsrp_db, self._last_sinr_db, self.cell_loads.copy(), self.ue_priorities.copy()
+                else:
+                    return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
+                           self.cell_loads.copy(), self.ue_priorities.copy()
+            rsrp_db_tf, sinr_db_tf = self.compute_metrics_tf(
+                self.ue_loc, self.bs_loc, self.ut_orientations,
+                self.bs_orientations, self.ue_velocities, self.in_state
+            )
+            self._last_rsrp_db = rsrp_db_tf.numpy() 
+            self._last_sinr_db = sinr_db_tf.numpy()
+            return self._last_rsrp_db, self._last_sinr_db, self.cell_loads.copy(), self.ue_priorities.copy()
+        except tf.errors.InvalidArgumentError as e: print(f"TensorFlow InvalidArgumentError in compute_metrics: {e}")
+        except tf.errors.ResourceExhaustedError as e: print(f"GPU memory EXCEEDED in compute_metrics: {e}")
+        except AttributeError as ae: print(f"AttributeError during Sionna UMi metric computation: {ae}")
+        except Exception as e:
+            print(f"General Error during Sionna UMi metric computation: {e}")
+            if hasattr(self, 'ue_loc') and hasattr(self, 'bs_loc'):
+                 print(f"Variables at error: ue_loc shape: {self.ue_loc.shape}, bs_loc shape: {self.bs_loc.shape}")
+        return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
+               self.cell_loads.copy(), self.ue_priorities.copy()
+
     def update_cell_loads(self, assignments):
-        # (Unchanged)
         self.cell_loads = np.zeros(NUM_CELLS)
         unique_cells, counts = np.unique(assignments, return_counts=True)
         load_per_ue = 1.0 / NUM_UES
         for cell_idx, count in zip(unique_cells, counts):
-            if 0 <= cell_idx < NUM_CELLS:
-                self.cell_loads[cell_idx] = count * load_per_ue
+             if 0 <= cell_idx < NUM_CELLS: self.cell_loads[cell_idx] = count * load_per_ue
         self.cell_loads = np.clip(self.cell_loads, 0.0, 1.0)
 
 # --- Module 2: Traffic Steering Algorithms ---
 class TrafficSteering:
     def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.8):
-        self.algorithm = algorithm
-        self.rsrp_threshold = rsrp_threshold
-        self.hysteresis = hysteresis
-        self.ttt = ttt
-        self.load_threshold = load_threshold
-        self.prev_assignments = None
-        self.ttt_targets = {}
-
+        self.algorithm = algorithm; self.rsrp_threshold = rsrp_threshold
+        self.hysteresis = hysteresis; self.ttt = ttt; self.load_threshold = load_threshold
+        self.prev_assignments = None; self.ttt_targets = {}
     def assign_initial(self, rsrp):
-        self.prev_assignments = np.argmax(rsrp, axis=1)
-        self.ttt_targets = {}
+        self.prev_assignments = np.argmax(rsrp, axis=1); self.ttt_targets = {}
         return self.prev_assignments.copy()
-
     def baseline_a3(self, rsrp, sinr, cell_loads, priorities, dt):
-        # (Unchanged)
-        if self.prev_assignments is None:
-            return self.assign_initial(rsrp)
+        if self.prev_assignments is None: return self.assign_initial(rsrp)
         assignments = self.prev_assignments.copy()
         current_ttt_targets_state = {k: v.copy() for k, v in self.ttt_targets.items()}
         for ue_idx in range(NUM_UES):
-            current_cell = assignments[ue_idx]
-            best_neighbor_quality = -np.inf
-            potential_target = -1
-            if ue_idx not in current_ttt_targets_state:
-                current_ttt_targets_state[ue_idx] = {}
+            current_cell = assignments[ue_idx]; best_neighbor_quality = -np.inf; potential_target = -1
+            if ue_idx not in current_ttt_targets_state: current_ttt_targets_state[ue_idx] = {}
             active_targets_for_ue = set()
             for cell_idx in range(NUM_CELLS):
-                if cell_idx == current_cell:
-                    continue
+                if cell_idx == current_cell: continue
                 a3_cond = rsrp[ue_idx, cell_idx] > rsrp[ue_idx, current_cell] + self.hysteresis
                 load_cond = cell_loads[cell_idx] < self.load_threshold
                 rsrp_cond = rsrp[ue_idx, cell_idx] > self.rsrp_threshold
@@ -257,19 +245,14 @@ class TrafficSteering:
                     active_targets_for_ue.add(cell_idx)
                     current_ttt_targets_state[ue_idx][cell_idx] = current_ttt_targets_state[ue_idx].get(cell_idx, 0) + dt
                     if current_ttt_targets_state[ue_idx][cell_idx] >= self.ttt:
-                        if rsrp[ue_idx, cell_idx] > best_neighbor_quality:
-                            best_neighbor_quality = rsrp[ue_idx, cell_idx]
-                            potential_target = cell_idx
+                         if rsrp[ue_idx, cell_idx] > best_neighbor_quality:
+                             best_neighbor_quality = rsrp[ue_idx, cell_idx]; potential_target = cell_idx
             targets_to_reset = set(current_ttt_targets_state[ue_idx].keys()) - active_targets_for_ue
-            for target in targets_to_reset:
-                current_ttt_targets_state[ue_idx].pop(target, None)
+            for target in targets_to_reset: current_ttt_targets_state[ue_idx].pop(target, None)
             if potential_target != -1:
-                assignments[ue_idx] = potential_target
-                current_ttt_targets_state[ue_idx] = {}
-        self.prev_assignments = assignments
-        self.ttt_targets = current_ttt_targets_state
+                assignments[ue_idx] = potential_target; current_ttt_targets_state[ue_idx] = {}
+        self.prev_assignments = assignments; self.ttt_targets = current_ttt_targets_state
         return assignments
-
     def utility_based(self, rsrp, sinr, cell_loads, priorities):
         assignments = np.zeros(NUM_UES, dtype=int)
         for ue_idx in range(NUM_UES):
@@ -277,24 +260,19 @@ class TrafficSteering:
             for cell_idx in range(NUM_CELLS):
                 sinr_c = 0.5 * np.clip(sinr[ue_idx, cell_idx], -20, 30)
                 load_c = 0.3 * (1.0 - cell_loads[cell_idx]) * 20
-                prio_c = 0.2 * (4.0 - float(priorities[ue_idx])) * 10  # Convert priority to float
+                prio_c = 0.2 * (4.0 - float(priorities[ue_idx])) * 10
                 utilities[cell_idx] = sinr_c + load_c + prio_c
             assignments[ue_idx] = np.argmax(utilities)
-        self.prev_assignments = assignments
-        self.ttt_targets = {}
+        self.prev_assignments = assignments; self.ttt_targets = {}
         return assignments
-
     def assign_ues(self, rsrp, sinr, cell_loads, priorities, dt=1.0):
-        if self.algorithm == "baseline":
-            return self.baseline_a3(rsrp, sinr, cell_loads, priorities, dt)
-        if self.algorithm == "utility":
-            return self.utility_based(rsrp, sinr, cell_loads, priorities)
-        if self.prev_assignments is None:
-            self.assign_initial(rsrp)
+        if self.algorithm == "baseline": return self.baseline_a3(rsrp, sinr, cell_loads, priorities, dt)
+        if self.algorithm == "utility": return self.utility_based(rsrp, sinr, cell_loads, priorities)
+        if self.prev_assignments is None: self.assign_initial(rsrp)
         return self.prev_assignments.copy()
 
 # --- Module 3: AI Fuzzer ---
-class AIFuzzer: # (Identical to previous version)
+class AIFuzzer:
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering, population_size=FUZZER_POPULATION, generations=FUZZER_GENERATIONS):
         self.env = env; self.ts = ts
         self.population_size = population_size; self.generations = generations
@@ -313,7 +291,7 @@ class AIFuzzer: # (Identical to previous version)
             temp_loads = np.clip(original_loads + load_modifier, 0, 1)
             self.env.ue_loc.assign(original_positions_tf + position_modifier_tf)
             self.env.cell_loads = temp_loads
-            rsrp, sinr, _, priorities = self.env.compute_metrics() # Calls the new OFDM-based version
+            rsrp, sinr, _, priorities = self.env.compute_metrics()
             self.ts.prev_assignments = current_assignments
             new_assignments = self.ts.assign_ues(rsrp, sinr, temp_loads, priorities, dt=dt_fitness)
             num_handovers = np.sum(new_assignments != current_assignments)
@@ -357,7 +335,7 @@ class AIFuzzer: # (Identical to previous version)
         return best_overall_individual
 
 # --- Module 3b: Random Fuzzer ---
-class RandomFuzzer: # (Identical to previous version)
+class RandomFuzzer:
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering):
         self.env = env
     def generate_inputs(self, dt=1.0):
@@ -367,7 +345,7 @@ class RandomFuzzer: # (Identical to previous version)
         return inputs
 
 # --- Module 4: Oracle ---
-class Oracle: # (Identical to previous version)
+class Oracle:
     def __init__(self, ping_pong_window=3, ping_pong_threshold=1, qos_sinr_threshold=0.0, fairness_threshold=0.5):
         self.ping_pong_window = ping_pong_window; self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold; self.fairness_threshold = fairness_threshold
@@ -404,7 +382,7 @@ class Oracle: # (Identical to previous version)
         return vulnerabilities_found
 
 # --- Module 5: Main Simulation Loop and Analysis ---
-def run_simulation(scenario_name, initial_load=0.3, max_speed=5): # (Identical to previous version v12)
+def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     print(f"\n--- Running Scenario: {scenario_name} (Load: {initial_load}, Speed: {max_speed}) ---")
     start_time_scenario = time.time()
     ts_baseline_proto = TrafficSteering(algorithm="baseline"); ts_utility_proto = TrafficSteering(algorithm="utility")
@@ -452,7 +430,7 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5): # (Identical t
     end_time_scenario = time.time(); print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
-def plot_results(df, output_plot_dir="plots_default"): # (Identical to previous version v12)
+def plot_results(df, output_plot_dir="plots_default"):
     print("\n--- Generating Plots ---");
     if df.empty: print("No data to plot."); return
     os.makedirs(output_plot_dir, exist_ok=True)
@@ -475,7 +453,7 @@ def plot_results(df, output_plot_dir="plots_default"): # (Identical to previous 
         except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
         plt.close()
 
-def summarize_results(df): # (Identical to previous version v12)
+def summarize_results(df):
     print("\n--- Results Summary ---")
     if df.empty: print("No results to summarize."); return
     all_vuln_strings = [v for sl in df['vulnerabilities'] for v in sl if isinstance(v, str)]
@@ -503,50 +481,68 @@ def summarize_results(df): # (Identical to previous version v12)
 
 
 def main():
-    script_version_name = "v13_lsp_sf_random_fuzzer"
+    script_version_name = "v17_OFDM_NameError_fix_and_GPU_check" # Updated Version Name
     print(f"--- Starting AI Fuzzing Simulation ({script_version_name}) ---")
     start_time_main = time.time()
+
+    if ENABLE_TF_DEVICE_LOGGING:
+        tf.debugging.set_log_device_placement(True)
 
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
-            strategy = tf.distribute.MirroredStrategy(devices=["GPU:0", "GPU:1"])
-            print(f"--- Using MirroredStrategy with {strategy.num_replicas_in_sync} replicas ---")
-        except Exception as e:
-            print(f"Error setting up MirroredStrategy: {e}. Falling back to single GPU.")
-            strategy = tf.distribute.get_strategy()
+            # Try MirroredStrategy if more than one GPU, else default to single specified GPU or TF default
+            if len(gpus) > 1 and False: # Set to True to attempt MirroredStrategy
+                strategy = tf.distribute.MirroredStrategy(devices=[f"/gpu:{i}" for i in range(len(gpus))]) # Or specific GPUs
+                print(f"--- Using MirroredStrategy with {strategy.num_replicas_in_sync} replicas on {len(gpus)} GPUs ---")
+            else: # Default to single GPU if only one or MirroredStrategy disabled
+                tf.config.set_visible_devices(gpus[0], 'GPU')
+                strategy = tf.distribute.get_strategy() 
+                print(f"--- Using default strategy on 1 GPU: {gpus[0].name} ---")
+            
+            for gpu in tf.config.get_visible_devices('GPU'): # Apply to all visible GPUs
+                tf.config.experimental.set_memory_growth(gpu, True)
+            
+            logical_gpus = tf.config.list_logical_devices('GPU')
+            print(f"--- Detected {len(tf.config.get_visible_devices('GPU'))} visible Physical GPU(s). Configured {len(logical_gpus)} Logical GPU(s) with memory growth. ---")
+            for i, gpu_device in enumerate(logical_gpus):
+                 print(f"    Logical GPU {i}: {gpu_device.name}")
+
+        except RuntimeError as e:
+            print(f"Error during GPU setup: {e}. Using default CPU strategy.")
+            strategy = tf.distribute.get_strategy() 
     else:
-        print("--- No GPU detected. Running on CPU. ---")
+        print("--- No GPU detected by TensorFlow. Running on CPU. ---")
         strategy = tf.distribute.get_strategy()
 
-    scenarios_to_run = [('Low Load', 0.3, 5), ('High Load', 0.7, 5), ('High Mobility', 0.5, 10)]
-    all_results_data = []
-    for name, load, speed in scenarios_to_run:
-        np.random.seed(42)
-        tf.random.set_seed(42)
-        with strategy.scope():
+
+    with strategy.scope(): 
+        scenarios_to_run = [('Low Load', 0.3, 5), ('High Load', 0.7, 5), ('High Mobility', 0.5, 10)]
+        all_results_data = []
+        for name, load, speed in scenarios_to_run:
+            np.random.seed(42); tf.random.set_seed(42)
             results = run_simulation(scenario_name=name, initial_load=load, max_speed=speed)
-        all_results_data.extend(results)
-        partial_df = pd.DataFrame(results)
-        partial_df.to_csv(f'fuzzing_results_{script_version_name}_{name.replace(" ","_")}.csv', index=False)
-        tf.keras.backend.clear_session()  # Clear GPU memory
+            all_results_data.extend(results)
+            # Optional: Save partial results
+            # partial_df = pd.DataFrame(results_list) # Should be results from current scenario
+            # partial_df.to_csv(f'fuzzing_results_{script_version_name}_{name.replace(" ","_")}_partial.csv', index=False)
+            # tf.keras.backend.clear_session()
 
-    if not all_results_data:
-        print("Simulation produced no results.")
-        return
-
+    if not all_results_data: print("Simulation produced no results."); return
+    
     results_df = pd.DataFrame(all_results_data)
     csv_filename = f'fuzzing_results_{script_version_name}.csv'
     plot_dir = f"plots_{script_version_name}"
 
-    try:
-        results_df.to_csv(csv_filename, index=False, encoding='utf-8')
-        print(f"\n--- Results saved to {csv_filename} ---")
-    except Exception as e:
-        print(f"Error saving results to CSV {csv_filename}: {e}")
-
+    try: results_df.to_csv(csv_filename, index=False, encoding='utf-8'); print(f"\n--- Results saved to {csv_filename} ---")
+    except Exception as e: print(f"Error saving results to CSV {csv_filename}: {e}")
+    
     summarize_results(results_df)
     plot_results(results_df, plot_dir)
-
+    
     end_time_main = time.time()
     print(f"\n--- Simulation Finished in {end_time_main - start_time_main:.2f} seconds ---")
+
+if __name__ == "__main__":
+    np.random.seed(42); tf.random.set_seed(42)
+    main()
