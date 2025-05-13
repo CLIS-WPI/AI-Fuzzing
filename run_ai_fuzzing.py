@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
-# Version 17: Corrected NameError in compute_metrics_tf.
-#             User MUST ensure they are using a GPU-enabled Docker container where TensorFlow can see the GPUs.
+# Version 18: Enabled MirroredStrategy for multi-GPU attempt.
 
 # --- Imports ---
 import sionna
@@ -16,7 +15,7 @@ from collections import Counter
 # --- Sionna specific imports for channel modeling ---
 from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
 from sionna.phy.ofdm import ResourceGrid
-from sionna.phy.channel import GenerateOFDMChannel # Using GenerateOFDMChannel directly
+from sionna.phy.channel import GenerateOFDMChannel
 
 
 # --- Global Constants ---
@@ -27,20 +26,18 @@ CARRIER_FREQUENCY = 3.5e9  # 3.5 GHz
 TX_POWER_DBM = 30  # dBm
 NOISE_POWER_DBM_PER_HZ = -174  # dBm/Hz
 
-# Start with VERY low iterations for testing these major changes
-SIMULATION_ITERATIONS = 2
-FUZZER_GENERATIONS = 2
-FUZZER_POPULATION = 2
+SIMULATION_ITERATIONS = 100
+FUZZER_GENERATIONS = 100
+FUZZER_POPULATION = 10
 
-ENABLE_DETAILED_METRIC_PRINT = True 
+ENABLE_DETAILED_METRIC_PRINT = False 
 ENABLE_TF_DEVICE_LOGGING = False
 
 
 # --- Module 1: Network Simulation Environment ---
 class NetworkEnvironment:
     def __init__(self, initial_load=0.3):
-        # print(f"Initializing NetworkEnvironment with Full OFDM Channel (v17) and load: {initial_load}")
-        self.batch_size = 1
+        self.batch_size = 1 
 
         self.ut_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
                                    polarization='single', polarization_type='V',
@@ -109,10 +106,11 @@ class NetworkEnvironment:
         num_effective_sc = self.resource_grid.num_effective_subcarriers
         self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / tf.cast(num_effective_sc, tf.float32)
         
-        # print("NetworkEnvironment Initialized (Full OFDM Channel v17).")
+        # print("NetworkEnvironment Initialized (Full OFDM Channel v18).")
 
 
     def update_ue_positions_and_velocities(self, dt=1.0, max_speed=5):
+        # (Identical to previous version)
         new_velocities = self.ue_velocities + tf.random.normal(shape=self.ue_velocities.shape, stddev=1.0, dtype=tf.float32) * dt
         speeds = tf.norm(new_velocities, axis=2, keepdims=True)
         safe_speeds = tf.where(speeds < 1e-9, tf.ones_like(speeds) * 1e-9, speeds)
@@ -139,6 +137,7 @@ class NetworkEnvironment:
 
     @tf.function(jit_compile=True)
     def compute_metrics_tf(self, ue_loc_tf, bs_loc_tf, ut_orient_tf, bs_orient_tf, ut_vel_tf, in_state_tf):
+        # (Identical to previous version v17)
         self.channel_model_3gpp.set_topology(
             ut_loc=ue_loc_tf, bs_loc=bs_loc_tf,
             ut_orientations=ut_orient_tf, bs_orientations=bs_orient_tf,
@@ -146,29 +145,24 @@ class NetworkEnvironment:
         )
         h_freq = self.generate_h_freq_layer(batch_size=self.batch_size)
         
-        if ENABLE_DETAILED_METRIC_PRINT:
+        if ENABLE_DETAILED_METRIC_PRINT and not tf.config.functions_run_eagerly():
              tf.print(f"h_freq shape: {tf.shape(h_freq)}")
 
         h_freq_squeezed = tf.squeeze(h_freq, axis=[2, 4])
         avg_channel_power_gain = tf.reduce_mean(tf.abs(h_freq_squeezed)**2, axis=[-2, -1])
         received_power_watts_tf = self.tx_power_watts_total * avg_channel_power_gain
         received_power_watts_tf = tf.where(tf.math.is_finite(received_power_watts_tf), received_power_watts_tf, tf.zeros_like(received_power_watts_tf))
-
-        rp_ue_cell = received_power_watts_tf[0] # Corrected: Define rp_ue_cell from received_power_watts_tf
-        
+        rp_ue_cell = received_power_watts_tf[0]
         rsrp_db_tf = 10.0 * (tf.math.log(tf.maximum(rp_ue_cell / 1e-3, 1e-20)) / tf.math.log(10.0))
-        
-        signal_power_ue_cell = rp_ue_cell # Now this is correct
+        signal_power_ue_cell = rp_ue_cell 
         total_power_at_ue_u = tf.reduce_sum(rp_ue_cell, axis=1, keepdims=True)
         interference_ue_cell = total_power_at_ue_u - signal_power_ue_cell
         noise_ue_cell = self.noise_power_watts * tf.ones_like(signal_power_ue_cell)
         sinr_linear_tf = tf.math.divide_no_nan(signal_power_ue_cell, interference_ue_cell + noise_ue_cell)
         sinr_db_tf = 10.0 * (tf.math.log(tf.maximum(sinr_linear_tf, 1e-20)) / tf.math.log(10.0))
-        
         rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
         sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
-
-        if ENABLE_DETAILED_METRIC_PRINT:
+        if ENABLE_DETAILED_METRIC_PRINT and not tf.config.functions_run_eagerly():
             if hasattr(self.channel_model_3gpp, '_lsp') and \
                self.channel_model_3gpp._lsp is not None and \
                hasattr(self.channel_model_3gpp._lsp, 'sf'):
@@ -180,6 +174,7 @@ class NetworkEnvironment:
         return rsrp_db_tf, sinr_db_tf
 
     def compute_metrics(self):
+        # (Identical to previous version v17 wrapper)
         if self.channel_model_3gpp is None or self.resource_grid is None or not hasattr(self, 'generate_h_freq_layer'):
             print("CRITICAL ERROR: Sionna components not initialized for OFDM-based metrics.")
             return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
@@ -212,6 +207,7 @@ class NetworkEnvironment:
                self.cell_loads.copy(), self.ue_priorities.copy()
 
     def update_cell_loads(self, assignments):
+        # (Identical to previous version)
         self.cell_loads = np.zeros(NUM_CELLS)
         unique_cells, counts = np.unique(assignments, return_counts=True)
         load_per_ue = 1.0 / NUM_UES
@@ -220,7 +216,7 @@ class NetworkEnvironment:
         self.cell_loads = np.clip(self.cell_loads, 0.0, 1.0)
 
 # --- Module 2: Traffic Steering Algorithms ---
-class TrafficSteering:
+class TrafficSteering: # (Identical to previous version)
     def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.8):
         self.algorithm = algorithm; self.rsrp_threshold = rsrp_threshold
         self.hysteresis = hysteresis; self.ttt = ttt; self.load_threshold = load_threshold
@@ -272,7 +268,7 @@ class TrafficSteering:
         return self.prev_assignments.copy()
 
 # --- Module 3: AI Fuzzer ---
-class AIFuzzer:
+class AIFuzzer: # (Identical to previous version)
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering, population_size=FUZZER_POPULATION, generations=FUZZER_GENERATIONS):
         self.env = env; self.ts = ts
         self.population_size = population_size; self.generations = generations
@@ -335,7 +331,7 @@ class AIFuzzer:
         return best_overall_individual
 
 # --- Module 3b: Random Fuzzer ---
-class RandomFuzzer:
+class RandomFuzzer: # (Identical to previous version)
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering):
         self.env = env
     def generate_inputs(self, dt=1.0):
@@ -345,7 +341,7 @@ class RandomFuzzer:
         return inputs
 
 # --- Module 4: Oracle ---
-class Oracle:
+class Oracle: # (Identical to previous version)
     def __init__(self, ping_pong_window=3, ping_pong_threshold=1, qos_sinr_threshold=0.0, fairness_threshold=0.5):
         self.ping_pong_window = ping_pong_window; self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold; self.fairness_threshold = fairness_threshold
@@ -382,7 +378,7 @@ class Oracle:
         return vulnerabilities_found
 
 # --- Module 5: Main Simulation Loop and Analysis ---
-def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
+def run_simulation(scenario_name, initial_load=0.3, max_speed=5): # (Identical to previous version v12)
     print(f"\n--- Running Scenario: {scenario_name} (Load: {initial_load}, Speed: {max_speed}) ---")
     start_time_scenario = time.time()
     ts_baseline_proto = TrafficSteering(algorithm="baseline"); ts_utility_proto = TrafficSteering(algorithm="utility")
@@ -430,7 +426,7 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     end_time_scenario = time.time(); print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
-def plot_results(df, output_plot_dir="plots_default"):
+def plot_results(df, output_plot_dir="plots_default"): # (Identical to previous version v12)
     print("\n--- Generating Plots ---");
     if df.empty: print("No data to plot."); return
     os.makedirs(output_plot_dir, exist_ok=True)
@@ -453,7 +449,7 @@ def plot_results(df, output_plot_dir="plots_default"):
         except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
         plt.close()
 
-def summarize_results(df):
+def summarize_results(df): # (Identical to previous version v12)
     print("\n--- Results Summary ---")
     if df.empty: print("No results to summarize."); return
     all_vuln_strings = [v for sl in df['vulnerabilities'] for v in sl if isinstance(v, str)]
@@ -481,7 +477,7 @@ def summarize_results(df):
 
 
 def main():
-    script_version_name = "v17_OFDM_NameError_fix_and_GPU_check" # Updated Version Name
+    script_version_name = "v15_OFDM_precision_fix" # Updated version name
     print(f"--- Starting AI Fuzzing Simulation ({script_version_name}) ---")
     start_time_main = time.time()
 
@@ -491,22 +487,19 @@ def main():
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
-            # Try MirroredStrategy if more than one GPU, else default to single specified GPU or TF default
-            if len(gpus) > 1 and False: # Set to True to attempt MirroredStrategy
-                strategy = tf.distribute.MirroredStrategy(devices=[f"/gpu:{i}" for i in range(len(gpus))]) # Or specific GPUs
-                print(f"--- Using MirroredStrategy with {strategy.num_replicas_in_sync} replicas on {len(gpus)} GPUs ---")
-            else: # Default to single GPU if only one or MirroredStrategy disabled
-                tf.config.set_visible_devices(gpus[0], 'GPU')
-                strategy = tf.distribute.get_strategy() 
-                print(f"--- Using default strategy on 1 GPU: {gpus[0].name} ---")
+            # Defaulting to single GPU for now to ensure OFDM model stability first
+            tf.config.set_visible_devices(gpus[0], 'GPU') 
+            strategy = tf.distribute.get_strategy() 
+            print(f"--- Using default strategy on 1 GPU: {gpus[0].name} ---")
             
-            for gpu in tf.config.get_visible_devices('GPU'): # Apply to all visible GPUs
+            for gpu in tf.config.get_visible_devices('GPU'): 
                 tf.config.experimental.set_memory_growth(gpu, True)
             
             logical_gpus = tf.config.list_logical_devices('GPU')
             print(f"--- Detected {len(tf.config.get_visible_devices('GPU'))} visible Physical GPU(s). Configured {len(logical_gpus)} Logical GPU(s) with memory growth. ---")
-            for i, gpu_device in enumerate(logical_gpus):
-                 print(f"    Logical GPU {i}: {gpu_device.name}")
+            if logical_gpus:
+                 for i, gpu_device in enumerate(logical_gpus):
+                      print(f"    Logical GPU {i}: {gpu_device.name}")
 
         except RuntimeError as e:
             print(f"Error during GPU setup: {e}. Using default CPU strategy.")
@@ -523,11 +516,7 @@ def main():
             np.random.seed(42); tf.random.set_seed(42)
             results = run_simulation(scenario_name=name, initial_load=load, max_speed=speed)
             all_results_data.extend(results)
-            # Optional: Save partial results
-            # partial_df = pd.DataFrame(results_list) # Should be results from current scenario
-            # partial_df.to_csv(f'fuzzing_results_{script_version_name}_{name.replace(" ","_")}_partial.csv', index=False)
-            # tf.keras.backend.clear_session()
-
+            
     if not all_results_data: print("Simulation produced no results."); return
     
     results_df = pd.DataFrame(all_results_data)
