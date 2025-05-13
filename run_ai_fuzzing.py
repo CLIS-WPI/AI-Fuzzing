@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
-# Version 9: Reverted to using _lsp_sampler for pathloss (as in v7 that ran with low iterations),
-#            and attempting to use ._lsp.sf for shadow fading as per latest helper info.
-#            Keeping num_time_samples=1 for UMi call as confirmed by user experiment.
+# Version 12: Optimized print outputs for long runs.
+#             Uses _lsp_sampler for pathloss, ._lsp.sf for shadow fading,
+#             and num_time_samples=1 for UMi call.
 
 # --- Imports ---
 import sionna
@@ -28,15 +28,17 @@ CARRIER_FREQUENCY = 3.5e9  # 3.5 GHz
 TX_POWER_DBM = 30  # dBm
 NOISE_POWER_DBM_PER_HZ = -174  # dBm/Hz
 
-SIMULATION_ITERATIONS = 2
-FUZZER_GENERATIONS = 2
-FUZZER_POPULATION = 2
+SIMULATION_ITERATIONS = 100 # User setting for longer runs
+FUZZER_GENERATIONS = 100  # User setting for longer runs
+FUZZER_POPULATION = 10    # User setting for longer runs
+
+ENABLE_DETAILED_METRIC_PRINT = False # SET TO TRUE FOR DEBUGGING LSP/SF VALUES IN COMPUTE_METRICS
 
 
 # --- Module 1: Network Simulation Environment ---
 class NetworkEnvironment:
     def __init__(self, initial_load=0.3):
-        # print(f"Initializing NetworkEnvironment with Sionna 3GPP UMi (LSP-based) and initial load: {initial_load}")
+        # print(f"Initializing NetworkEnvironment with Sionna 3GPP UMi (LSP-based) and initial load: {initial_load}") # Verbose
         self.batch_size = 1
 
         self.ut_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
@@ -45,14 +47,16 @@ class NetworkEnvironment:
         self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
                                    polarization='single', polarization_type='V',
                                    antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY)
+        # print("Antenna arrays defined.") # Verbose
 
         try:
             self.channel_model_3gpp = UMi(
                 carrier_frequency=CARRIER_FREQUENCY, o2i_model='low',
                 ut_array=self.ut_array, bs_array=self.bs_array,
                 direction='downlink', enable_pathloss=True, enable_shadow_fading=True,
-                always_generate_lsp=False # Default
+                always_generate_lsp=False
             )
+            # print("Sionna UMi channel model instantiated.") # Verbose
         except Exception as e:
             print(f"CRITICAL ERROR instantiating Sionna UMi model: {e}")
             raise
@@ -63,13 +67,15 @@ class NetworkEnvironment:
             cyclic_prefix_length=20, pilot_pattern="kronecker",
             pilot_ofdm_symbol_indices=[2, 11]
         )
+        # print("OFDM Resource Grid defined.") # Verbose
         
         if self.channel_model_3gpp:
-            self.ofdm_channel = OFDMChannel(
+            self.ofdm_channel = OFDMChannel( # Not directly used in LSP-only metrics for now
                 channel_model=self.channel_model_3gpp,
                 resource_grid=self.resource_grid,
                 add_awgn=True, normalize_channel=True
             )
+            # print("Sionna OFDMChannel instantiated.") # Verbose
         else:
             self.ofdm_channel = None
 
@@ -95,7 +101,7 @@ class NetworkEnvironment:
 
         self.noise_power_watts = 10**((NOISE_POWER_DBM_PER_HZ - 30) / 10) * BANDWIDTH
         self.tx_power_watts = 10**((TX_POWER_DBM - 30) / 10)
-        # print("NetworkEnvironment Initialized (Sionna UMi - LSP based).")
+        # print("NetworkEnvironment Initialized (Sionna UMi - LSP based).") # Verbose
 
 
     def update_ue_positions_and_velocities(self, dt=1.0, max_speed=5):
@@ -120,61 +126,42 @@ class NetworkEnvironment:
 
     def compute_metrics(self):
         if self.channel_model_3gpp is None:
-            print("CRITICAL ERROR: 3GPP Channel model not initialized in compute_metrics.")
+            # ... (error handling as before)
             return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
                    self.cell_loads.copy(), self.ue_priorities.copy()
         try:
-            # 1. Set topology for the channel model
             self.channel_model_3gpp.set_topology(
-                ut_loc=self.ue_loc, 
-                bs_loc=self.bs_loc,
-                ut_orientations=self.ut_orientations, 
-                bs_orientations=self.bs_orientations,
-                ut_velocities=self.ue_velocities, 
-                in_state=self.in_state
+                ut_loc=self.ue_loc, bs_loc=self.bs_loc,
+                ut_orientations=self.ut_orientations, bs_orientations=self.bs_orientations,
+                ut_velocities=self.ue_velocities, in_state=self.in_state
             )
-            
-            if self.resource_grid is None:
-                 print("CRITICAL ERROR: ResourceGrid not initialized.")
-                 raise ValueError("ResourceGrid is None, cannot determine sampling frequency.")
-            
+            if self.resource_grid is None: raise ValueError("ResourceGrid is None.")
             sampling_freq = self.resource_grid.bandwidth
+            _, _ = self.channel_model_3gpp(num_time_samples=1, sampling_frequency=sampling_freq)
 
-            # 2. Call the main channel model. This is kept from version 7 that ran with low iterations,
-            #    as it might be necessary to fully initialize internal states for _lsp_sampler and _lsp.
-            #    Using num_time_samples as confirmed by user's experiment to avoid 'unexpected keyword' error.
-            _, _ = self.channel_model_3gpp(
-                num_time_samples=1, 
-                sampling_frequency=sampling_freq
-            )
-
-            # 3. Access pathloss using _lsp_sampler (as in user's validated version 7)
-            # Expected shape from _lsp_sampler.sample_pathloss is [batch_size, num_tx(CELLS), num_rx(UES)]
+            if not hasattr(self.channel_model_3gpp, '_lsp_sampler') or \
+               not hasattr(self.channel_model_3gpp._lsp_sampler, 'sample_pathloss'):
+                raise AttributeError("CRITICAL: '_lsp_sampler' or 'sample_pathloss' method not found.")
             pathloss_db_tf_raw = self.channel_model_3gpp._lsp_sampler.sample_pathloss()
-            pathloss_db_tf = tf.transpose(pathloss_db_tf_raw[0], [1, 0]) # Transpose to [NUM_UES, NUM_CELLS]
+            pathloss_db_tf = tf.transpose(pathloss_db_tf_raw[0], [1, 0])
 
-            # 4. Access shadow fading using ._lsp.sf (as per helper's latest specific advice)
-            # This assumes ._lsp and its .sf attribute are populated after set_topology and/or the __call__ above.
             if not hasattr(self.channel_model_3gpp, '_lsp') or self.channel_model_3gpp._lsp is None:
-                # This should ideally not happen if the __call__ above populates it,
-                # or if set_topology populates it directly when always_generate_lsp=False
-                print("Warning: '_lsp' attribute not found or not populated. Defaulting shadow fading to zeros.")
+                if ENABLE_DETAILED_METRIC_PRINT: print("Warning (compute_metrics): '_lsp' attribute not found. Defaulting SF to zeros.")
                 sf_db_tf = tf.zeros_like(pathloss_db_tf)
             elif not hasattr(self.channel_model_3gpp._lsp, 'sf'):
-                print("Warning: 'sf' attribute not found on '._lsp' object. Defaulting shadow fading to zeros.")
+                if ENABLE_DETAILED_METRIC_PRINT: print("Warning (compute_metrics): 'sf' not found on '._lsp'. Defaulting SF to zeros.")
                 sf_db_tf = tf.zeros_like(pathloss_db_tf)
             else:
                 sf_db_tf_raw = self.channel_model_3gpp._lsp.sf
-                # Assuming sf also has shape [batch_size, num_tx(CELLS), num_rx(UES)] like pathloss_db_tf_raw
-                sf_db_tf = tf.transpose(sf_db_tf_raw[0], [1, 0]) # Transpose to [NUM_UES, NUM_CELLS]
-                # print("Successfully accessed shadow fading via ._lsp.sf") # Less verbose
-
+                sf_db_tf = tf.transpose(sf_db_tf_raw[0], [1, 0])
+                if ENABLE_DETAILED_METRIC_PRINT:
+                    # This will only print if the global flag is True
+                    print(f"SF accessed via ._lsp.sf: Min={tf.reduce_min(sf_db_tf):.2f}, Max={tf.reduce_max(sf_db_tf):.2f}, Mean={tf.reduce_mean(sf_db_tf):.2f}")
+            
             rsrp_db_tf = TX_POWER_DBM - pathloss_db_tf - sf_db_tf
             rsrp_db = rsrp_db_tf.numpy()
-
             total_loss_linear_tf = 10.0**((pathloss_db_tf + sf_db_tf) / 10.0)
             received_power_watts_tf = self.tx_power_watts / total_loss_linear_tf
-
             sinr_db = np.zeros((NUM_UES, NUM_CELLS))
             received_power_watts_np = received_power_watts_tf.numpy()
             for ue_idx in range(NUM_UES):
@@ -188,9 +175,11 @@ class NetworkEnvironment:
                     sinr_linear = np.maximum(sinr_linear, 1e-20)
                     sinr_db[ue_idx, cell_idx] = 10 * np.log10(sinr_linear)
         except AttributeError as ae:
+            # ... (error handling as before)
             print(f"AttributeError during Sionna UMi metric computation: {ae}")
             rsrp_db = np.full((NUM_UES, NUM_CELLS), -200.0); sinr_db = np.full((NUM_UES, NUM_CELLS), -30.0)
         except Exception as e:
+            # ... (error handling as before)
             print(f"General Error during Sionna UMi metric computation: {e}")
             if hasattr(self, 'ue_loc') and hasattr(self, 'bs_loc'):
                  print(f"Variables at error: ue_loc shape: {self.ue_loc.shape}, bs_loc shape: {self.bs_loc.shape}")
@@ -198,6 +187,7 @@ class NetworkEnvironment:
         return rsrp_db, sinr_db, self.cell_loads.copy(), self.ue_priorities.copy()
 
     def update_cell_loads(self, assignments):
+        # ... (as before)
         self.cell_loads = np.zeros(NUM_CELLS)
         unique_cells, counts = np.unique(assignments, return_counts=True)
         load_per_ue = 1.0 / NUM_UES
@@ -206,7 +196,7 @@ class NetworkEnvironment:
         self.cell_loads = np.clip(self.cell_loads, 0.0, 1.0)
 
 # --- Module 2: Traffic Steering Algorithms (Largely Unchanged) ---
-class TrafficSteering:
+class TrafficSteering: # (Content is the same as previous version)
     def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.8):
         self.algorithm = algorithm; self.rsrp_threshold = rsrp_threshold
         self.hysteresis = hysteresis; self.ttt = ttt; self.load_threshold = load_threshold
@@ -257,8 +247,8 @@ class TrafficSteering:
         if self.prev_assignments is None: self.assign_initial(rsrp)
         return self.prev_assignments.copy()
 
-# --- Module 3: AI Fuzzer (Ensure ue_loc is handled as TF tensor) ---
-class AIFuzzer:
+# --- Module 3: AI Fuzzer ---
+class AIFuzzer: # (Content is the same as previous version)
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering, population_size=FUZZER_POPULATION, generations=FUZZER_GENERATIONS):
         self.env = env; self.ts = ts
         self.population_size = population_size; self.generations = generations
@@ -320,8 +310,18 @@ class AIFuzzer:
             population = new_population
         return best_overall_individual
 
-# --- Module 4: Oracle (Using stricter QoS threshold if passed) ---
-class Oracle:
+# --- Module 3b: Random Fuzzer ---
+class RandomFuzzer: # (Content is the same as previous version)
+    def __init__(self, env: NetworkEnvironment, ts: TrafficSteering):
+        self.env = env
+    def generate_inputs(self, dt=1.0):
+        load_modifier = np.random.uniform(-0.3, 0.3, NUM_CELLS)
+        position_modifier_2d = np.random.uniform(-15, 15, (NUM_UES, 2))
+        inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
+        return inputs
+
+# --- Module 4: Oracle (Largely Unchanged) ---
+class Oracle: # (Content is the same as previous version)
     def __init__(self, ping_pong_window=3, ping_pong_threshold=1, qos_sinr_threshold=0.0, fairness_threshold=0.5):
         self.ping_pong_window = ping_pong_window; self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold; self.fairness_threshold = fairness_threshold
@@ -358,57 +358,67 @@ class Oracle:
         return vulnerabilities_found
 
 # --- Module 5: Main Simulation Loop and Analysis ---
-def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
+def run_simulation(scenario_name, initial_load=0.3, max_speed=5): # (Content is the same as previous version v11)
     print(f"\n--- Running Scenario: {scenario_name} (Load: {initial_load}, Speed: {max_speed}) ---")
     start_time_scenario = time.time()
-    ts_baseline = TrafficSteering(algorithm="baseline"); ts_utility = TrafficSteering(algorithm="utility")
-    algorithms = {"baseline": ts_baseline, "utility": ts_utility}
+    ts_baseline_proto = TrafficSteering(algorithm="baseline"); ts_utility_proto = TrafficSteering(algorithm="utility")
     oracle = Oracle(qos_sinr_threshold=5.0); results_list = []; dt = 1.0
-    for algo_name, ts_instance in algorithms.items():
-        print(f"--- Algorithm: {algo_name} ---"); start_time_algo = time.time()
-        current_env_state = NetworkEnvironment(initial_load=initial_load)
-        ue_vel_2d_np_init = np.random.uniform(-max_speed, max_speed, size=(NUM_UES, 2))
-        current_env_state.ue_velocities.assign(np.hstack([ue_vel_2d_np_init, np.zeros((NUM_UES, 1))])[np.newaxis,...])
-        ts_instance.prev_assignments = None; ts_instance.ttt_targets = {}; oracle.handover_history = {}
-        fuzzer = AIFuzzer(current_env_state, ts_instance, population_size=FUZZER_POPULATION, generations=FUZZER_GENERATIONS)
-        rsrp_init, sinr_init, load_init, prio_init = current_env_state.compute_metrics()
-        _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
-        current_assignments = ts_instance.prev_assignments
-        if current_assignments is None: print(f"CRITICAL ERROR: Initial assignment failed for {algo_name}. Skipping."); continue
-        current_env_state.update_cell_loads(current_assignments)
-        for iteration in range(SIMULATION_ITERATIONS):
-            fuzzed_inputs = fuzzer.generate_inputs(dt)
-            load_modifier = fuzzed_inputs[:NUM_CELLS]
-            position_modifier_2d = fuzzed_inputs[NUM_CELLS:].reshape(NUM_UES, 2)
-            position_modifier_3d = np.hstack([position_modifier_2d, np.zeros((NUM_UES,1))])
-            current_env_state.cell_loads = np.clip(current_env_state.cell_loads + load_modifier, 0, 1)
-            current_env_state.ue_loc.assign_add(tf.constant(position_modifier_3d[np.newaxis,...], dtype=tf.float32))
-            current_env_state.update_ue_positions_and_velocities(dt, max_speed)
-            rsrp, sinr, cell_loads_eval, priorities_eval = current_env_state.compute_metrics()
-            new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt)
-            current_env_state.update_cell_loads(new_assignments)
-            vulnerabilities = oracle.evaluate(rsrp, sinr, new_assignments, current_env_state.cell_loads, priorities_eval)
-            results_list.append({
-                'scenario': scenario_name, 'iteration': iteration, 'algorithm': algo_name,
-                'assignments': new_assignments.tolist(), 'cell_loads': current_env_state.cell_loads.tolist(),
-                'vulnerabilities': vulnerabilities})
-            if (iteration + 1) % (SIMULATION_ITERATIONS // 10 or 1) == 0 :
-                 print(f"    Algo: {algo_name}, Scenario: {scenario_name}, Iter: {iteration + 1}/{SIMULATION_ITERATIONS} done.")
-        end_time_algo = time.time(); print(f"--- Algorithm {algo_name} finished in {end_time_algo - start_time_algo:.2f} seconds ---")
+    fuzzer_map = {"AI": AIFuzzer, "Random": RandomFuzzer}
+    for fuzzer_name, FuzzerClass in fuzzer_map.items():
+        print(f"=== Fuzzer Type: {fuzzer_name} ===")
+        algorithms_to_run_with_fuzzer = {"baseline": ts_baseline_proto, "utility": ts_utility_proto}
+        for actual_algo_name, ts_instance_proto in algorithms_to_run_with_fuzzer.items():
+            print(f"--- Algorithm: {actual_algo_name} (with {fuzzer_name} Fuzzer) ---"); start_time_algo = time.time()
+            current_env_state = NetworkEnvironment(initial_load=initial_load)
+            ue_vel_2d_np_init = np.random.uniform(-max_speed, max_speed, size=(NUM_UES, 2))
+            current_env_state.ue_velocities.assign(np.hstack([ue_vel_2d_np_init, np.zeros((NUM_UES, 1))])[np.newaxis,...])
+            ts_instance = TrafficSteering(algorithm=actual_algo_name, 
+                                          rsrp_threshold=ts_instance_proto.rsrp_threshold,
+                                          hysteresis=ts_instance_proto.hysteresis,
+                                          ttt=ts_instance_proto.ttt,
+                                          load_threshold=ts_instance_proto.load_threshold)
+            oracle.handover_history = {}
+            fuzzer = FuzzerClass(current_env_state, ts_instance)
+            rsrp_init, sinr_init, load_init, prio_init = current_env_state.compute_metrics()
+            _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
+            current_assignments = ts_instance.prev_assignments
+            if current_assignments is None: print(f"CRITICAL ERROR: Initial assignment for {actual_algo_name} with {fuzzer_name}. Skipping."); continue
+            current_env_state.update_cell_loads(current_assignments)
+            for iteration in range(SIMULATION_ITERATIONS):
+                fuzzed_inputs = fuzzer.generate_inputs(dt)
+                load_modifier = fuzzed_inputs[:NUM_CELLS]
+                position_modifier_2d = fuzzed_inputs[NUM_CELLS:].reshape(NUM_UES, 2)
+                position_modifier_3d = np.hstack([position_modifier_2d, np.zeros((NUM_UES,1))])
+                current_env_state.cell_loads = np.clip(current_env_state.cell_loads + load_modifier, 0, 1)
+                current_env_state.ue_loc.assign_add(tf.constant(position_modifier_3d[np.newaxis,...], dtype=tf.float32))
+                current_env_state.update_ue_positions_and_velocities(dt, max_speed)
+                rsrp, sinr, cell_loads_eval, priorities_eval = current_env_state.compute_metrics()
+                new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt)
+                current_env_state.update_cell_loads(new_assignments)
+                vulnerabilities = oracle.evaluate(rsrp, sinr, new_assignments, current_env_state.cell_loads, priorities_eval)
+                results_list.append({
+                    'scenario': scenario_name, 'iteration': iteration, 'fuzzer_type': fuzzer_name,
+                    'algorithm': actual_algo_name, 'assignments': new_assignments.tolist(), 
+                    'cell_loads': current_env_state.cell_loads.tolist(), 'vulnerabilities': vulnerabilities})
+                if (iteration + 1) % (SIMULATION_ITERATIONS // 10 or 1) == 0 :
+                     print(f"    Fuzzer: {fuzzer_name}, Algo: {actual_algo_name}, Scenario: {scenario_name}, Iter: {iteration + 1}/{SIMULATION_ITERATIONS} done.")
+            end_time_algo = time.time(); print(f"--- Algorithm {actual_algo_name} with {fuzzer_name} Fuzzer finished in {end_time_algo - start_time_algo:.2f} seconds ---")
     end_time_scenario = time.time(); print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
-def plot_results(df):
+def plot_results(df): # (Content is the same as previous version v11)
     print("\n--- Generating Plots ---");
     if df.empty: print("No data to plot."); return
-    plot_dir = "plots_sionna_lsp_v8"; os.makedirs(plot_dir, exist_ok=True)
+    plot_dir = "plots_sionna_lsp_v12"; os.makedirs(plot_dir, exist_ok=True)
     for scenario in df['scenario'].unique():
         plt.figure(figsize=(12, 7)); scenario_df = df[df['scenario'] == scenario].copy()
         scenario_df['vulnerability_count'] = scenario_df['vulnerabilities'].apply(len)
-        for algo in scenario_df['algorithm'].unique():
-            algo_df = scenario_df[scenario_df['algorithm'] == algo]
-            plot_data = algo_df.groupby('iteration')['vulnerability_count'].mean()
-            plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', label=f"{algo}")
+        for fuzzer_type in scenario_df['fuzzer_type'].unique():
+            fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
+            for algo in fuzzer_df['algorithm'].unique():
+                algo_fuzzer_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
+                plot_data = algo_fuzzer_df.groupby('iteration')['vulnerability_count'].mean()
+                plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', label=f"{algo} ({fuzzer_type} Fuzzer)")
         plt.xlabel('Iteration'); plt.ylabel('Average Number of Vulnerabilities Detected')
         plt.title(f'Vulnerabilities - Scenario: {scenario}'); plt.legend(); plt.grid(True)
         plt.xticks(np.arange(0, SIMULATION_ITERATIONS, step=max(1, SIMULATION_ITERATIONS // 10)))
@@ -419,30 +429,34 @@ def plot_results(df):
         except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
         plt.close()
 
-def summarize_results(df):
+def summarize_results(df): # (Content is the same as previous version v11)
     print("\n--- Results Summary ---")
     if df.empty: print("No results to summarize."); return
     all_vuln_strings = [v for sl in df['vulnerabilities'] for v in sl if isinstance(v, str)]
     overall_counts = Counter(all_vuln_strings)
-    print("Overall Vulnerability Counts:");
+    print("Overall Vulnerability Counts (All Fuzzers & Algorithms):");
     if not overall_counts: print("  No vulnerabilities detected overall.")
     else:
         for vuln_str, count in overall_counts.most_common(): print(f"  '{vuln_str}': {count}")
-    print("-" * 20)
+    print("-" * 40)
     for scenario in df['scenario'].unique():
         print(f"\nScenario: {scenario}")
-        for algo in df[df['scenario'] == scenario]['algorithm'].unique():
-            print(f"  Algorithm: {algo}")
-            algo_df = df[(df['scenario'] == scenario) & (df['algorithm'] == algo)]
-            algo_vuln_strings = [v for sl in algo_df['vulnerabilities'] for v in sl if isinstance(v,str)]
-            if not algo_vuln_strings: print("    No vulnerabilities detected.")
-            else:
-                algo_counts = Counter(algo_vuln_strings)
-                for vuln_str, count in algo_counts.most_common(): print(f"    '{vuln_str}': {count} occurrences")
+        scenario_data = df[df['scenario'] == scenario]
+        for fuzzer_type in scenario_data['fuzzer_type'].unique():
+            print(f"  Fuzzer Type: {fuzzer_type}")
+            fuzzer_data = scenario_data[scenario_data['fuzzer_type'] == fuzzer_type]
+            for algo in fuzzer_data['algorithm'].unique():
+                print(f"    Algorithm: {algo}")
+                algo_fuzzer_df = fuzzer_data[fuzzer_data['algorithm'] == algo]
+                algo_vuln_strings = [v for sl in algo_fuzzer_df['vulnerabilities'] for v in sl if isinstance(v,str)]
+                if not algo_vuln_strings: print("      No vulnerabilities detected.")
+                else:
+                    algo_counts = Counter(algo_vuln_strings)
+                    for vuln_str, count in algo_counts.most_common(): print(f"      '{vuln_str}': {count} occurrences")
     print("\n--- End Summary ---")
 
 def main():
-    print("--- Starting AI Fuzzing Simulation (Sionna LSP Integration v8 - Using ._lsp directly, no UMi call in metrics) ---") # Version updated
+    print("--- Starting AI Fuzzing Simulation (v12 - Combined Friend's Suggestions for LSP and RandomFuzzer) ---")
     start_time_main = time.time()
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -463,10 +477,13 @@ def main():
 
     if not all_results_data: print("Simulation produced no results."); return
     results_df = pd.DataFrame(all_results_data)
-    csv_filename = 'fuzzing_results_sionna_lsp_v8.csv' # New CSV filename
+    csv_filename = 'fuzzing_results_sionna_lsp_v12.csv'
     try: results_df.to_csv(csv_filename, index=False, encoding='utf-8'); print(f"\n--- Results saved to {csv_filename} ---")
     except Exception as e: print(f"Error saving results to CSV {csv_filename}: {e}")
-    summarize_results(results_df); plot_results(results_df)
+    
+    summarize_results(results_df)
+    plot_results(results_df)
+    
     end_time_main = time.time()
     print(f"\n--- Simulation Finished in {end_time_main - start_time_main:.2f} seconds ---")
 
