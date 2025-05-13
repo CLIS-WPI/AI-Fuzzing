@@ -1,0 +1,22 @@
+2025-05-13 20:29:01.762331: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-05-13 20:29:01.803386: I tensorflow/core/platform/cpu_feature_guard.cc:211] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: SSE3 SSE4.1 SSE4.2 AVX, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2025-05-13 20:29:04.683307: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1928] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 90685 MB memory:  -> device: 0, name: NVIDIA H100 NVL, pci bus id: 0000:43:00.0, compute capability: 9.0
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1747168156.631503     153 service.cc:145] XLA service 0x6222e20e34e0 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+I0000 00:00:1747168156.631533     153 service.cc:153]   StreamExecutor device (0): NVIDIA H100 NVL, Compute Capability 9.0
+W0000 00:00:1747168156.835212     153 assert_op.cc:38] Ignoring Assert operator assert_greater_equal/Assert/Assert
+W0000 00:00:1747168156.835901     153 assert_op.cc:38] Ignoring Assert operator assert_less_equal/Assert/Assert
+W0000 00:00:1747168156.835921     153 assert_op.cc:38] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
+W0000 00:00:1747168156.835938     153 assert_op.cc:38] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
+W0000 00:00:1747168156.836100     153 assert_op.cc:38] Ignoring Assert operator assert_less_equal_1/Assert/Assert
+W0000 00:00:1747168156.836116     153 assert_op.cc:38] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
+2025-05-13 20:29:16.838996: I tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.cc:268] disabling MLIR crash reproducer, set env var `MLIR_CRASH_REPRODUCER_DIRECTORY` to enable.
+2025-05-13 20:29:17.369872: I external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:465] Loaded cuDNN version 90500
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1747168169.090593     153 asm_compiler.cc:369] ptxas warning : Registers are spilled to local memory in function 'loop_gather_fusion_5', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_fusion_18', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_reduce_fusion_7', 12 bytes spill stores, 24 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_bitcast_fusion_5', 4 bytes spill stores, 4 bytes spill loads
+
+I0000 00:00:1747168169.107485     153 device_compiler.h:188] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
