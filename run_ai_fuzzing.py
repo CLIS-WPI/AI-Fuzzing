@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
-# Version 21: Incorporating friend's feedback: Tuned Fuzzer/Oracle params,
-#             added more metrics, and shape assertions. Based on v20 (retracing fix).
+# Version 22: Tuned Fuzzer/Oracle params, added more metrics,
+#             kept OFDM model and retracing fix.
 
 # --- Imports ---
 import sionna
@@ -27,7 +27,7 @@ CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
-SIMULATION_ITERATIONS = 100
+SIMULATION_ITERATIONS = 100 # Or your desired number for a full run
 FUZZER_GENERATIONS = 100
 FUZZER_POPULATION = 10
 
@@ -102,7 +102,7 @@ class NetworkEnvironment:
         self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / tf.cast(num_effective_sc, tf.float32)
         
         self.reset(initial_load, scenario_max_speed)
-        # print("NetworkEnvironment Initialized (Full OFDM Channel v21).")
+        # print(f"NetworkEnvironment Initialized (Full OFDM Channel v{SCRIPT_VERSION_NAME}).") # Use global for version
 
     def reset(self, initial_load, max_speed):
         self.initial_load_param = initial_load
@@ -119,7 +119,6 @@ class NetworkEnvironment:
         self.ue_velocities.assign(np.hstack([ue_vel_2d_np, np.zeros((NUM_UES, 1))])[np.newaxis,...])
         
         self.cell_loads = np.ones(NUM_CELLS) * initial_load
-        # self.ue_priorities = np.random.choice([1, 2, 3], size=NUM_UES, p=[0.3, 0.4, 0.3]).astype(np.float32) # Reset if needed
 
     def update_ue_positions_and_velocities(self, dt=1.0, max_speed=None):
         if max_speed is None: max_speed = self.max_speed_param
@@ -156,13 +155,11 @@ class NetworkEnvironment:
         )
         h_freq = self.generate_h_freq_layer(batch_size=self.batch_size)
         
-        if ENABLE_DETAILED_METRIC_PRINT: # and not tf.config.functions_run_eagerly():
-             # For JIT, tf.print can be problematic. Use with caution or when JIT is off.
-             # tf.debugging.assert_shapes is better for JIT if checks are needed.
+        if ENABLE_DETAILED_METRIC_PRINT:
             tf.debugging.assert_shapes([
                 (h_freq, (self.batch_size, NUM_UES, 1, NUM_CELLS, 1, self.resource_grid.num_ofdm_symbols, self.resource_grid.fft_size))
             ])
-            # tf.print(f"h_freq shape from GenerateOFDMChannel: {tf.shape(h_freq)}")
+            # tf.print(f"h_freq shape: {tf.shape(h_freq)}")
 
         h_freq_squeezed = tf.squeeze(h_freq, axis=[2, 4])
         avg_channel_power_gain = tf.reduce_mean(tf.abs(h_freq_squeezed)**2, axis=[-2, -1])
@@ -181,10 +178,6 @@ class NetworkEnvironment:
         
         rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
         sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
-
-        # The LSPs are implicitly included in h_freq. Logging _lsp.sf is for deeper debugging/comparison.
-        # if ENABLE_DETAILED_METRIC_PRINT and not tf.config.functions_run_eagerly():
-        #     # ... (SF logging as before) ...
         return rsrp_db_tf, sinr_db_tf
 
     def compute_metrics(self):
@@ -315,8 +308,8 @@ class AIFuzzer:
         population = []
         for _ in range(self.population_size):
             # Tuned fuzzer parameter ranges (more conservative)
-            load_modifier = np.random.uniform(-0.1, 0.1, NUM_CELLS) 
-            position_modifier = np.random.uniform(-5, 5, (NUM_UES, 2)) 
+            load_modifier = np.random.uniform(-0.1, 0.1, NUM_CELLS) # Load change +/- 10%
+            position_modifier = np.random.uniform(-5, 5, (NUM_UES, 2)) # Position change +/- 5m
             inputs = np.concatenate([load_modifier, position_modifier.flatten()])
             population.append(inputs)
         best_overall_fitness = np.inf; best_overall_individual = population[0].copy()
@@ -354,64 +347,86 @@ class RandomFuzzer:
 
 # --- Module 4: Oracle ---
 class Oracle:
-    def __init__(self, ping_pong_window=4, ping_pong_threshold=1, # Increased ping_pong_window
+    def __init__(self, ping_pong_window=4, ping_pong_threshold=2, # Adjusted Ping-Pong
                        qos_sinr_threshold=0.0, fairness_threshold=0.4): # Adjusted thresholds
         self.ping_pong_window = ping_pong_window
         self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold
         self.fairness_threshold = fairness_threshold
-        self.handover_history = {}
+        self.handover_history = {} # UE_IDX -> list of serving cell IDs
     def _jain_fairness(self, allocations):
         allocations = np.asarray(allocations)
-        # Filter out non-finite and very small values before calculation to avoid NaNs in fairness
-        allocations_cleaned = allocations[np.isfinite(allocations) & (allocations > 1e-12)] # Increased floor slightly
-        if len(allocations_cleaned) == 0: return 1.0 # Perfect fairness if no one gets resources
+        allocations_cleaned = allocations[np.isfinite(allocations) & (allocations > 1e-12)]
+        if len(allocations_cleaned) == 0: return 1.0
         sum_val = np.sum(allocations_cleaned)
         sum_sq_val = np.sum(allocations_cleaned**2)
-        if sum_sq_val < 1e-20: return 1.0 # Avoid division by zero if all allocations are extremely small
+        if sum_sq_val < 1e-20: return 1.0
         return sum_val**2 / (len(allocations_cleaned) * sum_sq_val)
     def evaluate(self, rsrp, sinr, assignments, cell_loads, priorities):
-        vulnerabilities_found = []; num_ping_pongs_detected_this_step = 0
+        vulnerabilities_found = []
+        num_ping_pongs_detected_this_step = 0
         for ue_idx in range(NUM_UES):
             if ue_idx not in self.handover_history: self.handover_history[ue_idx] = []
             self.handover_history[ue_idx].append(assignments[ue_idx])
             while len(self.handover_history[ue_idx]) > self.ping_pong_window:
                 self.handover_history[ue_idx].pop(0)
+            
             history = self.handover_history[ue_idx]
             if len(history) == self.ping_pong_window:
-                # Classic Ping-Pong: A -> B -> A
-                if history[0] == history[2] and history[0] != history[1] and \
-                   history[1] == history[3] and history[1] != history[2]: # A-B-A-B pattern (more robust for window 4)
-                     num_ping_pongs_detected_this_step += 1
-                # Simpler A-B-A for shorter windows if needed
-                # elif self.ping_pong_window == 3 and history[0] == history[2] and history[0] != history[1]:
-                #      num_ping_pongs_detected_this_step += 1
+                # A-B-A-B like pattern or frequent changes
+                # Counts unique cells in window, if high relative to window, it's oscillatory
+                # More robust: Check for specific A->B->A like patterns or > X HOs in window
+                # Example: if history[0] == history[2] and history[0] != history[1] and \
+                #    history[1] == history[3] and history[1] != history[2]: # A-B-A-B
+                # For now, a simpler check: if more than X unique cells in window (suggests oscillation)
+                # Or, if number of changes is high
+                changes = 0
+                for i in range(len(history) - 1):
+                    if history[i] != history[i+1]:
+                        changes +=1
+                if changes >= self.ping_pong_window -1 : # Max possible changes in a window
+                    num_ping_pongs_detected_this_step +=1
 
 
         if num_ping_pongs_detected_this_step >= self.ping_pong_threshold:
-            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs")
+            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating")
         
-        assigned_sinr = np.array([sinr[ue_idx, assignments[ue_idx]] for ue_idx in range(NUM_UES) if assignments[ue_idx] < NUM_CELLS and assignments[ue_idx] >=0])
-        # Ensure priorities array aligns with assigned_sinr if some UEs had invalid assignments filtered out
-        # For simplicity, assuming assignments are always valid for now for priority mask
+        # Use a temporary array for assigned SINR to avoid modifying input 'sinr'
+        # Also, handle cases where assignment index might be out of bounds if NUM_CELLS is small
+        # and assignment somehow gives a larger index (should not happen with argmax)
+        temp_assigned_sinr_list = []
+        for ue_idx in range(NUM_UES):
+            assigned_cell_idx = assignments[ue_idx]
+            if 0 <= assigned_cell_idx < NUM_CELLS: # Check if assigned cell index is valid
+                temp_assigned_sinr_list.append(sinr[ue_idx, assigned_cell_idx])
         
-        high_priority_mask = (priorities == 1) # Assuming priorities is [NUM_UES]
-        assigned_sinr_for_hp_ues = np.array([sinr[i, assignments[i]] for i in range(NUM_UES) if high_priority_mask[i]])
+        assigned_sinr_np = np.array(temp_assigned_sinr_list) if temp_assigned_sinr_list else np.array([])
 
 
-        if assigned_sinr_for_hp_ues.size > 0: # Check if there are any high priority UEs
-            avg_sinr_high = np.mean(assigned_sinr_for_hp_ues)
+        # QoS for high priority UEs
+        high_priority_mask = (priorities == 1)
+        # Filter assigned_sinr_np for only high priority UEs
+        assigned_sinr_hp_ues_list = []
+        for i in range(NUM_UES):
+            if high_priority_mask[i]:
+                assigned_cell_idx = assignments[i]
+                if 0 <= assigned_cell_idx < NUM_CELLS:
+                    assigned_sinr_hp_ues_list.append(sinr[i, assigned_cell_idx])
+        
+        assigned_sinr_hp_ues_np = np.array(assigned_sinr_hp_ues_list) if assigned_sinr_hp_ues_list else np.array([])
+
+        if assigned_sinr_hp_ues_np.size > 0:
+            avg_sinr_high = np.mean(assigned_sinr_hp_ues_np)
             if avg_sinr_high < self.qos_sinr_threshold:
                 vulnerabilities_found.append(f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB (Threshold: {self.qos_sinr_threshold} dB)")
         
-        # Use assigned_sinr (already filtered for valid assignments implicitly by list comprehension)
-        # Ensure sinr values are not excessively negative before converting to linear, which can cause overflow for 10**(large_negative/10)
-        # Clip SINR values before converting to linear for fairness calculation
-        clipped_sinr_for_fairness = np.clip(assigned_sinr, -30, 30) # Clip to avoid extreme values in fairness
-        assigned_sinr_linear = 10**(clipped_sinr_for_fairness / 10.0)
-        fairness = self._jain_fairness(assigned_sinr_linear)
-        if fairness < self.fairness_threshold:
-            vulnerabilities_found.append(f"Unfairness: Jain Index = {fairness:.2f}")
+        # Fairness
+        if assigned_sinr_np.size > 0: # Ensure there are values to calculate fairness for
+            clipped_sinr_for_fairness = np.clip(assigned_sinr_np, -30, 30)
+            assigned_sinr_linear = 10**(clipped_sinr_for_fairness / 10.0)
+            fairness = self._jain_fairness(assigned_sinr_linear)
+            if fairness < self.fairness_threshold:
+                vulnerabilities_found.append(f"Unfairness: Jain Index = {fairness:.2f}")
         return vulnerabilities_found
 
 # --- Module 5: Main Simulation Loop and Analysis ---
@@ -419,16 +434,17 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     print(f"\n--- Running Scenario: {scenario_name} (Load: {initial_load}, Speed: {max_speed}) ---")
     start_time_scenario = time.time()
     
-    # Create one NetworkEnvironment instance per scenario run
     shared_env_state = NetworkEnvironment(initial_load=initial_load, scenario_max_speed=max_speed)
 
-    # Adjusted Oracle thresholds as per friend's suggestion (example values)
+    ts_baseline_proto = TrafficSteering(algorithm="baseline")
+    ts_utility_proto = TrafficSteering(algorithm="utility")
+    
+    # Using tuned Oracle thresholds
     oracle = Oracle(qos_sinr_threshold=0.0, fairness_threshold=0.4, ping_pong_window=4, ping_pong_threshold=2)
     results_list = []; dt = 1.0
 
     fuzzer_map = {"AI": AIFuzzer, "Random": RandomFuzzer}
-    ts_prototypes = {"baseline": TrafficSteering(algorithm="baseline"), 
-                     "utility": TrafficSteering(algorithm="utility")}
+    ts_prototypes = {"baseline": ts_baseline_proto, "utility": ts_utility_proto}
 
     for fuzzer_name, FuzzerClass in fuzzer_map.items():
         print(f"=== Fuzzer Type: {fuzzer_name} ===")
@@ -446,68 +462,110 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
             oracle.handover_history = {}
 
             fuzzer = FuzzerClass(shared_env_state, ts_instance)
-
-            # Store assignments from before TS makes a decision in this iteration
-            # This helps in calculating handovers *due to TS decisions in the current iteration*
-            # assignments_before_ts_decision_this_iter = shared_env_state.ue_assignments if hasattr(shared_env_state, 'ue_assignments') else np.full(NUM_UES, -1, dtype=int)
             
-            # Initial metric calculation and UE assignment
+            # Store prev_assignments for HO calculation
+            # This is assignments *before* any fuzzing or TS decision in the first iteration
+            assignments_before_iter_loop = ts_instance.prev_assignments # Will be None first time
+
             rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
             initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, shared_env_state.cell_loads, prio_init, dt=0)
-            # ts_instance.prev_assignments is now set by assign_ues
             
             if ts_instance.prev_assignments is None: 
                 print(f"CRITICAL ERROR: Initial assignment for {actual_algo_name} with {fuzzer_name}. Skipping.")
                 continue
-            shared_env_state.update_cell_loads(ts_instance.prev_assignments)
+            shared_env_state.update_cell_loads(ts_instance.prev_assignments) # Load after initial assignment
             
-            total_handovers_in_run = 0 # For this algorithm run
+            total_handovers_in_run = 0
 
             for iteration in range(SIMULATION_ITERATIONS):
-                assignments_at_start_of_iter = ts_instance.prev_assignments.copy()
+                assignments_at_start_of_iter = ts_instance.prev_assignments.copy() # Assignments from previous TS decision
 
                 fuzzed_inputs = fuzzer.generate_inputs(dt)
                 load_modifier = fuzzed_inputs[:NUM_CELLS]
                 position_modifier_2d = fuzzed_inputs[NUM_CELLS:].reshape(NUM_UES, 2)
-                position_modifier_3d = np.hstack([position_modifier_2d, np.zeros((NUM_UES,1))])
                 
                 shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
-                shared_env_state.ue_loc.assign_add(tf.constant(position_modifier_3d[np.newaxis,...], dtype=tf.float32))
-                shared_env_state.update_ue_positions_and_velocities(dt, max_speed) 
+                
+                # Apply position modifier
+                current_ue_loc_np = shared_env_state.ue_loc.numpy()
+                pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((NUM_UES, 1))])
+                modified_ue_loc_np = current_ue_loc_np + pos_modifier_3d_np[np.newaxis,...] # Add modifier
+                shared_env_state.ue_loc.assign(modified_ue_loc_np) # Assign fuzzed location
+                
+                # Then apply regular velocity update
+                shared_env_state.update_ue_positions_and_velocities(dt) # Uses scenario max_speed internally
                 
                 rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
                 new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt)
                 
-                # Calculate handovers for this iteration step
                 handovers_this_step = np.sum(new_assignments != assignments_at_start_of_iter)
                 total_handovers_in_run += handovers_this_step
 
                 shared_env_state.update_cell_loads(new_assignments)
                 vulnerabilities = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval)
                 
-                # Calculate additional metrics for this iteration
-                assigned_sinr_for_metrics = np.array([sinr[ue_idx, new_assignments[ue_idx]] for ue_idx in range(NUM_UES) if new_assignments[ue_idx] < NUM_CELLS and new_assignments[ue_idx] >=0])
-                avg_overall_sinr_iter = np.mean(assigned_sinr_for_metrics) if assigned_sinr_for_metrics.size > 0 else -999
+                # --- Calculate New Metrics ---
+                ue_locations_iter_list_str = str(shared_env_state.ue_loc.numpy()[0, :, :2].tolist())
+                serving_cell_ids_iter_str = str(new_assignments.tolist())
                 
-                priorities_iter = shared_env_state.ue_priorities # Assuming this is current
-                high_priority_mask_iter = (priorities_iter == 1)
-                assigned_sinr_hp_iter = np.array([sinr[i, new_assignments[i]] for i in range(NUM_UES) if high_priority_mask_iter[i]])
-                avg_high_prio_sinr_iter = np.mean(assigned_sinr_hp_iter) if assigned_sinr_hp_iter.size > 0 else -999
+                assigned_rsrp_iter_list = []
+                assigned_sinr_iter_list = []
+                for i in range(NUM_UES):
+                    assigned_cell = new_assignments[i]
+                    if 0 <= assigned_cell < NUM_CELLS:
+                        assigned_rsrp_iter_list.append(float(rsrp[i, assigned_cell]))
+                        assigned_sinr_iter_list.append(float(sinr[i, assigned_cell]))
+                    else: 
+                        assigned_rsrp_iter_list.append(np.nan) 
+                        assigned_sinr_iter_list.append(np.nan)
+                
+                assigned_sinr_np = np.array(assigned_sinr_iter_list)
+                assigned_sinr_np_finite = assigned_sinr_np[np.isfinite(assigned_sinr_np)]
 
-                clipped_sinr_for_fairness = np.clip(assigned_sinr_for_metrics, -30, 30)
-                fairness_index_iter = oracle._jain_fairness(10**(clipped_sinr_for_fairness / 10.0))
+                num_ues_below_qos_iter = np.sum(assigned_sinr_np_finite < oracle.qos_sinr_threshold)
+                sinr_5th_percentile_iter = np.percentile(assigned_sinr_np_finite, 5) if assigned_sinr_np_finite.size > 0 else np.nan
+                sinr_50th_percentile_iter = np.median(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan
+                sinr_95th_percentile_iter = np.percentile(assigned_sinr_np_finite, 95) if assigned_sinr_np_finite.size > 0 else np.nan
+
+                load_min_iter = np.min(shared_env_state.cell_loads)
+                load_max_iter = np.max(shared_env_state.cell_loads)
+                load_std_iter = np.std(shared_env_state.cell_loads)
+
+                fuzzed_load_modifier_iter_str = str(load_modifier.tolist())
+                fuzzed_pos_modifier_iter_str = str(position_modifier_2d.tolist())
+
+                avg_overall_sinr_iter = np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan
+                
+                priorities_iter = shared_env_state.ue_priorities
+                high_priority_mask_iter = (priorities_iter == 1)
+                assigned_sinr_hp_iter_list = [assigned_sinr_np[i] for i in range(NUM_UES) if high_priority_mask_iter[i] and np.isfinite(assigned_sinr_np[i])]
+                avg_high_prio_sinr_iter = np.mean(assigned_sinr_hp_iter_list) if assigned_sinr_hp_iter_list else np.nan
+                
+                clipped_sinr_for_fairness = np.clip(assigned_sinr_np_finite, -30, 30) if assigned_sinr_np_finite.size > 0 else np.array([])
+                fairness_index_iter = oracle._jain_fairness(10**(clipped_sinr_for_fairness / 10.0)) if clipped_sinr_for_fairness.size > 0 else 1.0
+
 
                 results_list.append({
-                    'scenario': scenario_name, 
-                    'iteration': iteration, 
-                    'fuzzer_type': fuzzer_name,
+                    'scenario': scenario_name, 'iteration': iteration, 'fuzzer_type': fuzzer_name,
                     'algorithm': actual_algo_name, 
-                    # 'assignments': new_assignments.tolist(), # Can be very large for CSV
-                    'cell_loads': shared_env_state.cell_loads.tolist(), 
-                    'avg_overall_sinr': avg_overall_sinr_iter,
-                    'avg_high_prio_sinr': avg_high_prio_sinr_iter,
-                    'fairness_index': fairness_index_iter,
-                    'handover_count_iter': handovers_this_step,
+                    'cell_loads_list_str': str(shared_env_state.cell_loads.tolist()), # Store as string
+                    'avg_overall_sinr': float(avg_overall_sinr_iter),
+                    'avg_high_prio_sinr': float(avg_high_prio_sinr_iter),
+                    'fairness_index': float(fairness_index_iter),
+                    'handover_count_iter': int(handovers_this_step),
+                    'ue_locations_str': ue_locations_iter_list_str,
+                    'serving_cell_ids_str': serving_cell_ids_iter_str,
+                    'assigned_rsrp_list_str': str(assigned_rsrp_iter_list),
+                    'assigned_sinr_list_str': str(assigned_sinr_iter_list),
+                    'num_ues_below_qos': int(num_ues_below_qos_iter),
+                    'sinr_5th_percentile': float(sinr_5th_percentile_iter),
+                    'sinr_50th_percentile': float(sinr_50th_percentile_iter),
+                    'sinr_95th_percentile': float(sinr_95th_percentile_iter),
+                    'load_min': float(load_min_iter),
+                    'load_max': float(load_max_iter),
+                    'load_std': float(load_std_iter),
+                    'fuzzed_load_modifier_str': fuzzed_load_modifier_iter_str,
+                    'fuzzed_pos_modifier_str': fuzzed_pos_modifier_iter_str,
                     'vulnerabilities': vulnerabilities
                 })
                 if (iteration + 1) % (SIMULATION_ITERATIONS // 10 or 1) == 0 :
@@ -522,51 +580,53 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
-# --- plot_results and summarize_results need to be updated to handle new metrics ---
 def plot_results(df, output_plot_dir="plots_default"):
-    print("\n--- Generating Plots ---")
+    print("\n--- Generating Plots ---");
     if df.empty: print("No data to plot."); return
     os.makedirs(output_plot_dir, exist_ok=True)
     
-    metrics_to_plot = ['vulnerability_count', 'avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 'handover_count_iter']
+    # Added new metrics to the list of what to plot
+    metrics_to_plot = ['vulnerability_count', 'avg_overall_sinr', 'avg_high_prio_sinr', 
+                       'fairness_index', 'handover_count_iter', 'num_ues_below_qos',
+                       'sinr_5th_percentile', 'sinr_95th_percentile', 'load_max', 'load_std']
     
     for scenario in df['scenario'].unique():
         scenario_df = df[df['scenario'] == scenario].copy()
         if 'vulnerabilities' in scenario_df.columns:
              scenario_df['vulnerability_count'] = scenario_df['vulnerabilities'].apply(len)
         else:
-            scenario_df['vulnerability_count'] = 0
-
+            scenario_df['vulnerability_count'] = 0 # Default if column is missing
 
         for metric in metrics_to_plot:
             if metric not in scenario_df.columns:
-                print(f"Metric {metric} not found in results, skipping plot for {scenario}.")
+                print(f"Metric '{metric}' not found in results for scenario '{scenario}', skipping plot.")
                 continue
 
-            plt.figure(figsize=(14, 8))
+            plt.figure(figsize=(14, 8)) # Wider for potentially more legend items
             for fuzzer_type in scenario_df['fuzzer_type'].unique():
                 fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
                 for algo in fuzzer_df['algorithm'].unique():
                     algo_fuzzer_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
-                    # Group by iteration and calculate mean for the metric
+                    if algo_fuzzer_df.empty or metric not in algo_fuzzer_df.columns:
+                        continue
                     plot_data = algo_fuzzer_df.groupby('iteration')[metric].mean()
                     plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', markersize=4, label=f"{algo} ({fuzzer_type})")
             
             plt.xlabel('Iteration')
             plt.ylabel(metric.replace('_', ' ').title())
             plt.title(f'{metric.replace("_", " ").title()} - Scenario: {scenario}')
-            plt.legend(loc='upper left', bbox_to_anchor=(1, 1)) # Place legend outside
+            plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.) # Legend outside plot
             plt.grid(True)
+            # Ensure SIMULATION_ITERATIONS is accessible, define globally or pass if needed
             plt.xticks(np.arange(0, SIMULATION_ITERATIONS + 1, step=max(1, SIMULATION_ITERATIONS // 10)))
-            if metric != 'vulnerability_count': # Allow auto-scaling for SINR etc.
-                 pass # plt.ylim(bottom=0 if metric != 'avg_overall_sinr' and metric != 'avg_high_prio_sinr' else None)
-            else:
-                plt.ylim(bottom=0)
+            if metric not in ['avg_overall_sinr', 'avg_high_prio_sinr', 'sinr_5th_percentile', 'sinr_95th_percentile']:
+                 plt.ylim(bottom=0) # For counts, fairness, load_std, load_max
 
             safe_scenario_name="".join(c for c in scenario if c.isalnum() or c in (' ','_')).rstrip()
-            plot_filename = os.path.join(output_plot_dir, f'{metric}_{safe_scenario_name.replace(" ","_")}.png')
+            # Use a more descriptive plot filename including the metric
+            plot_filename = os.path.join(output_plot_dir, f'{safe_scenario_name.replace(" ","_")}_{metric}.png')
             try:
-                plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for legend
+                plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for external legend
                 plt.savefig(plot_filename); print(f"Saved plot: {plot_filename}")
             except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
             plt.close()
@@ -575,7 +635,6 @@ def summarize_results(df):
     print("\n--- Results Summary ---")
     if df.empty: print("No results to summarize."); return
     
-    # Overall Summary (Aggregated across all runs)
     if 'vulnerabilities' in df.columns:
         all_vuln_strings = [v for sl in df['vulnerabilities'].dropna() for v in sl if isinstance(v, str)]
         overall_counts = Counter(all_vuln_strings)
@@ -587,7 +646,6 @@ def summarize_results(df):
         print("  'vulnerabilities' column not found in results for overall summary.")
     print("-" * 40)
 
-    # Per Scenario / Fuzzer Type / Algorithm Summary
     for scenario in df['scenario'].unique():
         print(f"\nScenario: {scenario}")
         scenario_data = df[df['scenario'] == scenario]
@@ -603,21 +661,37 @@ def summarize_results(df):
                     if not algo_vuln_strings: print("      No vulnerabilities detected.")
                     else:
                         algo_counts = Counter(algo_vuln_strings)
-                        for vuln_str, count in algo_counts.most_common(5): print(f"      '{vuln_str}': {count} occurrences")
+                        for vuln_str, count in algo_counts.most_common(5): # Show top 5
+                            print(f"      '{vuln_str}': {count} occurrences")
                 else:
                      print("      'vulnerabilities' column not found for this group.")
 
                 # Summarize new metrics
-                for metric in ['avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 'handover_count_iter']:
+                new_metrics_to_summarize = [
+                    'avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 
+                    'handover_count_iter', 'num_ues_below_qos',
+                    'sinr_5th_percentile', 'sinr_50th_percentile', 'sinr_95th_percentile',
+                    'load_min', 'load_max', 'load_std'
+                ]
+                for metric in new_metrics_to_summarize:
                     if metric in algo_fuzzer_df.columns:
-                        mean_metric = algo_fuzzer_df[metric].mean()
-                        std_metric = algo_fuzzer_df[metric].std()
-                        print(f"      Avg {metric.replace('_', ' ')}: {mean_metric:.2f} (Std: {std_metric:.2f})")
+                        # For list-like string columns, we might want to process them first if needed
+                        # For now, assuming they are numerical or we take their mean if they are series of numbers
+                        try:
+                            mean_metric = algo_fuzzer_df[metric].mean()
+                            std_metric = algo_fuzzer_df[metric].std()
+                            min_metric = algo_fuzzer_df[metric].min()
+                            max_metric = algo_fuzzer_df[metric].max()
+                            print(f"      Avg {metric.replace('_', ' ')}: {mean_metric:.2f} (Std: {std_metric:.2f}, Min: {min_metric:.2f}, Max: {max_metric:.2f})")
+                        except pd.errors.DataError: # Happens if column contains non-numeric like list strings
+                             print(f"      Metric '{metric}' contains non-numeric data, cannot compute mean/std directly.")
+                    # else:
+                    #      print(f"      Metric '{metric}' not found for summary.")
     print("\n--- End Summary ---")
 
 
 def main():
-    script_version_name = "v21_tuned_OFDM" # For output files
+    script_version_name = "v22_enhanced_metrics_tuned" 
     print(f"--- Starting AI Fuzzing Simulation ({script_version_name}) ---")
     start_time_main = time.time()
 
