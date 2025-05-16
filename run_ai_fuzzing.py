@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
 # Version 23: Fixed IndexError, optimized GPU usage, enhanced numerical stability
+# MODIFIED: ResourceGrid and Noise Power calculation for 20MHz BW consistency
 
 import sionna
 import tensorflow as tf
@@ -18,11 +19,11 @@ from sionna.phy.ofdm import ResourceGrid
 from sionna.phy.channel import GenerateOFDMChannel
 
 # Global Constants
-NUM_CELLS = 5
+NUM_CELLS = 6
 NUM_UES = 20
-BANDWIDTH = 20e6
+BANDWIDTH = 20e6  # پهنای باند نامی کانال، 20 مگاهرتز
 CARRIER_FREQUENCY = 3.5e9
-TX_POWER_DBM = 40.0
+TX_POWER_DBM = 42.0
 NOISE_POWER_DBM_PER_HZ = -174
 SIMULATION_ITERATIONS = 100
 FUZZER_GENERATIONS = 100
@@ -36,13 +37,13 @@ class NetworkEnvironment:
         self.initial_load_param = initial_load
         self.max_speed_param = scenario_max_speed
         self.ut_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
-                                  polarization='single', polarization_type='V',
-                                  antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
-                                  precision="single")
+                                   polarization='single', polarization_type='V',
+                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
+                                   precision="single")
         self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
-                                  polarization='single', polarization_type='V',
-                                  antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
-                                  precision="single")
+                                   polarization='single', polarization_type='V',
+                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
+                                   precision="single")
         try:
             self.channel_model_3gpp = UMa(
                 carrier_frequency=CARRIER_FREQUENCY,
@@ -51,30 +52,71 @@ class NetworkEnvironment:
                 bs_array=self.bs_array,
                 direction='downlink',
                 enable_pathloss=True,
-                enable_shadow_fading=False,
+                enable_shadow_fading=True,
                 always_generate_lsp=True,
                 precision="single"
             )
         except Exception as e:
-            print(f"CRITICAL ERROR instantiating Sionna UMi model: {e}")
+            print(f"CRITICAL ERROR instantiating Sionna UMa model: {e}") # UMa not UMi
             raise
+
+        # --- BEGIN ResourceGrid MODIFICATION for 20MHz BW ---
+        # مشخصات هدف:
+        # - پهنای باند نامی: 20 مگاهرتز
+        # - فاصله زیرحامل (SCS): 30 کیلوهرتز
+        # - تعداد بلوک منابع (RBs) استاندارد برای 20MHz و SCS 30kHz در NR برابر 66 است.
+        #   (طبق 3GPP TS 38.104 Table 5.3.2-1 برای FR1)
+        # - تعداد زیرحامل‌ها در هر RB برابر 12 است.
+        num_rbs = 66
+        subcarriers_per_rb = 12
+        scs = 30e3  # Subcarrier spacing
+
+        # تعداد کل زیرحامل‌های اشغال شده
+        num_occupied_subcarriers = num_rbs * subcarriers_per_rb  # 66 * 12 = 792
+
+        # انتخاب fft_size: باید توانی از 2 و بزرگتر یا مساوی num_occupied_subcarriers باشد.
+        fft_size_val = 1024  # کوچکترین توان 2 بزرگتر یا مساوی 792
+
+        # محاسبه guard_carriers برای مرکز کردن باند اشغال شده
+        # dc_null=True یک زیرحامل را برای DC رزرو می‌کند.
+        dc_null_active = True
+        total_guard_plus_dc = fft_size_val - num_occupied_subcarriers # 1024 - 792 = 232
+        
+        if dc_null_active:
+            num_remaining_guards = total_guard_plus_dc - 1 # 232 - 1 = 231
+        else:
+            num_remaining_guards = total_guard_plus_dc
+
+        guard_left = num_remaining_guards // 2 # 231 // 2 = 115
+        guard_right = num_remaining_guards - guard_left # 231 - 115 = 116
+        
+        # بررسی شرط پایلوت: num_effective_subcarriers باید مضربی از (num_tx * num_streams_per_tx) باشد.
+        # num_tx = NUM_CELLS = 6
+        # num_streams_per_tx = 1
+        # divisor = NUM_CELLS * 1 = 6
+        # num_effective_subcarriers در اینجا همان num_occupied_subcarriers یعنی 792 خواهد بود.
+        # 792 % 6 == 0 (792 = 132 * 6), پس شرط برقرار است.
+
         self.resource_grid = ResourceGrid(
-            num_ofdm_symbols=14, fft_size=127,
-            subcarrier_spacing=30e3,
+            num_ofdm_symbols=14,
+            fft_size=fft_size_val,
+            subcarrier_spacing=scs,
             num_tx=NUM_CELLS,
             num_streams_per_tx=1,
-            cyclic_prefix_length=20,
+            cyclic_prefix_length=72, #
             pilot_pattern="kronecker",
             pilot_ofdm_symbol_indices=[2, 11],
-            num_guard_carriers=(8, 8),
-            dc_null=True
+            num_guard_carriers=(guard_left, guard_right),
+            dc_null=dc_null_active
         )
+        # --- END ResourceGrid MODIFICATION ---
+
         self.generate_h_freq_layer = GenerateOFDMChannel(
             channel_model=self.channel_model_3gpp,
             resource_grid=self.resource_grid,
             precision="single"
         )
-        self.bs_pos_2d = np.array([[0, 0], [100, 0], [50, 86.6], [150, 86.6], [100, 43.3]]) * 1.0
+        self.bs_pos_2d = np.array([[0, 0], [100, 0], [50, 86.6], [150, 86.6], [100, 43.3], [50, 43.3]]) * 1.0
         self.bs_loc = tf.constant(np.hstack([self.bs_pos_2d, np.ones((NUM_CELLS, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
         self.ue_loc = tf.Variable(tf.zeros([self.batch_size, NUM_UES, 3], dtype=tf.float32), name="ue_loc")
         self.ue_velocities = tf.Variable(tf.zeros([self.batch_size, NUM_UES, 3], dtype=tf.float32), name="ue_velocities")
@@ -83,10 +125,23 @@ class NetworkEnvironment:
         self.in_state = tf.zeros([self.batch_size, NUM_UES], dtype=tf.bool)
         self.cell_loads = np.ones(NUM_CELLS) * initial_load
         self.ue_priorities = np.random.choice([1, 2, 3], size=NUM_UES, p=[0.3, 0.4, 0.3]).astype(np.float32)
-        self.noise_power_watts = 10**((NOISE_POWER_DBM_PER_HZ - 30) / 10) * BANDWIDTH
+
+        # --- BEGIN Noise Power MODIFICATION ---
+        # محاسبه پهنای باند موثر واقعی بر اساس ResourceGrid
+        # num_effective_subcarriers همان num_occupied_subcarriers خواهد بود (792)
+        # این تضمین می‌کند که توان نویز با پهنای باندی محاسبه می‌شود که سیگنال در آن شبیه‌سازی شده است.
+        actual_effective_bandwidth = self.resource_grid.num_effective_subcarriers * self.resource_grid.subcarrier_spacing
+        
+        # استفاده از actual_effective_bandwidth برای محاسبه توان نویز
+        self.noise_power_watts = 10**((NOISE_POWER_DBM_PER_HZ - 30) / 10) * actual_effective_bandwidth
+        # --- END Noise Power MODIFICATION ---
+
         self.tx_power_watts_total = 10**((TX_POWER_DBM - 30) / 10)
-        num_effective_sc = self.resource_grid.num_effective_subcarriers
-        self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / tf.cast(num_effective_sc, tf.float32)
+        
+        # توان انتقال در هر زیرحامل موثر محاسبه می‌شود که صحیح است
+        num_effective_sc_tf = tf.cast(self.resource_grid.num_effective_subcarriers, tf.float32)
+        self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / num_effective_sc_tf
+        
         self.reset(initial_load, scenario_max_speed)
 
     def reset(self, initial_load, max_speed):
@@ -370,8 +425,8 @@ class AIFuzzer:
         current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
         population = []
         for _ in range(self.population_size):
-            load_modifier = np.random.uniform(-0.1, 0.1, NUM_CELLS)
-            position_modifier = np.random.uniform(-5, 5, (NUM_UES, 2))
+            load_modifier = np.random.uniform(-0.05, 0.05, NUM_CELLS)  # از [-0.1, 0.1] به [-0.05, 0.05]
+            position_modifier = np.random.uniform(-2, 2, (NUM_UES, 2))  # از [-5, 5] به [-2, 2]
             inputs = np.concatenate([load_modifier, position_modifier.flatten()])
             population.append(inputs)
         best_overall_fitness = -np.inf
@@ -501,8 +556,8 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     print(f"\n--- Running Scenario: {scenario_name} (Load: {initial_load}, Speed: {max_speed}) ---")
     start_time_scenario = time.time()
     shared_env_state = NetworkEnvironment(initial_load=initial_load, scenario_max_speed=max_speed)
-    ts_baseline_proto = TrafficSteering(algorithm="baseline", load_threshold=0.2, ttt=0.3, hysteresis=8.0)
-    ts_utility_proto = TrafficSteering(algorithm="utility", load_threshold=0.2, ttt=0.3, hysteresis=8.0)
+    ts_baseline_proto = TrafficSteering(algorithm="baseline", load_threshold=0.2, ttt=0.3, hysteresis=10.0)
+    ts_utility_proto = TrafficSteering(algorithm="utility", load_threshold=0.2, ttt=0.3, hysteresis=10.0)
     oracle = Oracle(qos_sinr_threshold=2.0, fairness_threshold=0.4, ping_pong_window=10, ping_pong_threshold=2)
     results_list = []
     dt = 0.5
