@@ -14,17 +14,17 @@ import time
 from collections import Counter
 
 # --- Sionna specific imports for channel modeling ---
-from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
+from sionna.phy.channel.tr38901 import UMa, PanelArray, Antenna
 from sionna.phy.ofdm import ResourceGrid
 from sionna.phy.channel import GenerateOFDMChannel
 
 
 # --- Global Constants ---
-NUM_CELLS = 3
-NUM_UES = 30
+NUM_CELLS = 5
+NUM_UES = 20
 BANDWIDTH = 20e6
 CARRIER_FREQUENCY = 3.5e9
-TX_POWER_DBM = 30
+TX_POWER_DBM = 40.0
 NOISE_POWER_DBM_PER_HZ = -174
 
 SIMULATION_ITERATIONS = 100 # Or your desired number for a full run
@@ -37,8 +37,8 @@ ENABLE_TF_DEVICE_LOGGING = False
 
 # --- Module 1: Network Simulation Environment ---
 class NetworkEnvironment:
-    def __init__(self, initial_load=0.3, scenario_max_speed=5):
-        self.batch_size = 1 
+    def __init__(self, initial_load=0.3, scenario_max_speed=10.0):
+        self.batch_size = 1
         self.initial_load_param = initial_load
         self.max_speed_param = scenario_max_speed
 
@@ -46,26 +46,29 @@ class NetworkEnvironment:
                                    polarization='single', polarization_type='V',
                                    antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
                                    precision="single")
-        self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1, 
+        self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1,
                                    polarization='single', polarization_type='V',
                                    antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY,
                                    precision="single")
         
         try:
-            self.channel_model_3gpp = UMi(
-                carrier_frequency=CARRIER_FREQUENCY, o2i_model='low',
-                ut_array=self.ut_array, bs_array=self.bs_array,
-                direction='downlink', 
-                enable_pathloss=True, enable_shadow_fading=True,
-                always_generate_lsp=True, 
-                precision="single"
-            )
+            self.channel_model_3gpp = UMa(
+            carrier_frequency=CARRIER_FREQUENCY,
+            o2i_model='low',  # اضافه کردن پارامتر اجباری
+            ut_array=self.ut_array,
+            bs_array=self.bs_array,
+            direction='downlink',
+            enable_pathloss=True,
+            enable_shadow_fading=False,
+            always_generate_lsp=True,
+            precision="single"
+        )
         except Exception as e:
             print(f"CRITICAL ERROR instantiating Sionna UMi model: {e}")
             raise
 
         self.resource_grid = ResourceGrid(
-            num_ofdm_symbols=14, fft_size=128,
+            num_ofdm_symbols=14, fft_size=2040,
             subcarrier_spacing=30e3,
             num_tx=NUM_CELLS, 
             num_streams_per_tx=1, 
@@ -82,7 +85,7 @@ class NetworkEnvironment:
             precision="single" 
         )
         
-        self.bs_pos_2d = np.array([[0,0], [100,0], [50, 86.6]]) * 1.0
+        self.bs_pos_2d = np.array([[0, 0], [100, 0], [50, 86.6], [150, 86.6], [100, 43.3]]) * 1.0
         self.bs_loc = tf.constant(np.hstack([self.bs_pos_2d, np.ones((NUM_CELLS, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
         
         self.ue_loc = tf.Variable(tf.zeros([self.batch_size, NUM_UES, 3], dtype=tf.float32), name="ue_loc")
@@ -102,26 +105,44 @@ class NetworkEnvironment:
         self.tx_power_watts_per_subcarrier = self.tx_power_watts_total / tf.cast(num_effective_sc, tf.float32)
         
         self.reset(initial_load, scenario_max_speed)
-        # print(f"NetworkEnvironment Initialized (Full OFDM Channel v{SCRIPT_VERSION_NAME}).") # Use global for version
+
 
     def reset(self, initial_load, max_speed):
         self.initial_load_param = initial_load
         self.max_speed_param = max_speed
 
-        ue_pos_2d_np = np.concatenate([
-            np.random.uniform(-150, 250, size=(int(NUM_UES * 0.7), 2)),
-            np.random.normal([np.mean(self.bs_pos_2d[:,0]), np.mean(self.bs_pos_2d[:,1])], 50, size=(int(NUM_UES * 0.3), 2))
-        ])
+        # توزیع متعادل UEها در شعاع 50–200 متر از BSها
+        num_ues_per_cell = NUM_UES // NUM_CELLS
+        remaining_ues = NUM_UES % NUM_CELLS
+        ue_pos_2d_np = []
+        ue_idx = 0
+
+        for bs_idx in range(NUM_CELLS):
+            # تعداد UEها برای این سلول (شامل UEهای باقی‌مانده)
+            num_ues = num_ues_per_cell + (1 if bs_idx < remaining_ues else 0)
+            angles = np.random.uniform(0, 2 * np.pi, num_ues)
+            distances = np.sqrt(np.random.uniform(50**2, 100**2, num_ues))  #
+            x = distances * np.cos(angles) + self.bs_pos_2d[bs_idx, 0]
+            y = distances * np.sin(angles) + self.bs_pos_2d[bs_idx, 1]
+            ue_pos_2d_np.append(np.stack([x, y], axis=1))
+            ue_idx += num_ues
+
+        ue_pos_2d_np = np.concatenate(ue_pos_2d_np, axis=0)
         ue_pos_2d_np = np.clip(ue_pos_2d_np, -1e6, 1e6)
         self.ue_loc.assign(np.hstack([ue_pos_2d_np, np.ones((NUM_UES, 1)) * 1.5])[np.newaxis,...])
 
-        ue_vel_2d_np = np.random.uniform(-max_speed, max_speed, size=(NUM_UES, 2))
+        # تولید سرعت‌های تصادفی برای UEها
+        speeds = np.random.uniform(0, max_speed, NUM_UES)
+        directions = np.random.uniform(0, 2 * np.pi, NUM_UES)
+        ue_vel_2d_np = np.stack([speeds * np.cos(directions), speeds * np.sin(directions)], axis=1)
         self.ue_velocities.assign(np.hstack([ue_vel_2d_np, np.zeros((NUM_UES, 1))])[np.newaxis,...])
-        
+
         self.cell_loads = np.ones(NUM_CELLS) * initial_load
 
-    def update_ue_positions_and_velocities(self, dt=1.0, max_speed=None):
-        if max_speed is None: max_speed = self.max_speed_param
+    def update_ue_positions_and_velocities(self, dt=0.5, max_speed=None):
+        if max_speed is None:
+            max_speed = self.max_speed_param
+        # به‌روزرسانی سرعت‌ها
         new_velocities = self.ue_velocities + tf.random.normal(shape=self.ue_velocities.shape, stddev=1.0, dtype=tf.float32) * dt
         speeds = tf.norm(new_velocities, axis=2, keepdims=True)
         safe_speeds = tf.where(speeds < 1e-9, tf.ones_like(speeds) * 1e-9, speeds)
@@ -129,22 +150,57 @@ class NetworkEnvironment:
         new_velocities = new_velocities * scale
         new_velocities = tf.where(tf.math.is_finite(new_velocities), new_velocities, tf.zeros_like(new_velocities))
         self.ue_velocities.assign(new_velocities)
+        
+        # به‌روزرسانی موقعیت‌ها
         new_loc = self.ue_loc + new_velocities * dt
         new_loc = tf.where(tf.math.is_finite(new_loc), new_loc, self.ue_loc)
+        
+        # محدود کردن UEها به شعاع 200 متر از نزدیک‌ترین BS
+        new_loc_2d = new_loc[:, :, :2]  # [batch_size, NUM_UES, 2]
+        bs_loc_2d = self.bs_loc[:, :, :2]  # [batch_size, NUM_CELLS, 2]
+        new_loc_expanded = tf.expand_dims(new_loc_2d, axis=2)  # [batch_size, NUM_UES, 1, 2]
+        bs_loc_expanded = tf.expand_dims(bs_loc_2d, axis=1)  # [batch_size, 1, NUM_CELLS, 2]
+        distances = tf.norm(new_loc_expanded - bs_loc_expanded, axis=3)  # [batch_size, NUM_UES, NUM_CELLS]
+        closest_bs_idx = tf.argmin(distances, axis=2)  # [batch_size, NUM_UES]
+        distance_to_closest = tf.reduce_min(distances, axis=2)  # [batch_size, NUM_UES]
+        mask = distance_to_closest > 200.0  # [batch_size, NUM_UES]
+        direction = new_loc_2d - tf.gather(bs_loc_2d, closest_bs_idx, batch_dims=1)  # [batch_size, NUM_UES, 2]
+        norm_direction = direction / tf.maximum(distance_to_closest[:, :, tf.newaxis], 1e-9)  # [batch_size, NUM_UES, 2]
+        new_loc_2d = tf.where(mask[:, :, tf.newaxis],
+                            tf.gather(bs_loc_2d, closest_bs_idx, batch_dims=1) + norm_direction * 200.0,
+                            new_loc_2d)  # [batch_size, NUM_UES, 2]
+        new_loc = tf.concat([new_loc_2d, new_loc[:, :, 2:3]], axis=2)  # [batch_size, NUM_UES, 3]
         self.ue_loc.assign(new_loc)
+        
+        # محدود کردن به محدوده کلی و بازتاب سرعت
         ue_loc_np = self.ue_loc.numpy()[0]
         ue_vel_np = self.ue_velocities.numpy()[0]
-        min_x, max_x = -200.0, 300.0; min_y, max_y = -200.0, 250.0
-        hit_x_min = ue_loc_np[:, 0] <= min_x; hit_x_max = ue_loc_np[:, 0] >= max_x
-        hit_y_min = ue_loc_np[:, 1] <= min_y; hit_y_max = ue_loc_np[:, 1] >= max_y
-        ue_loc_np[hit_x_min, 0] = min_x; ue_loc_np[hit_x_max, 0] = max_x
-        ue_loc_np[hit_y_min, 1] = min_y; ue_loc_np[hit_y_max, 1] = max_y
+        min_x, max_x = -200.0, 300.0
+        min_y, max_y = -200.0, 250.0
+        hit_x_min = ue_loc_np[:, 0] <= min_x
+        hit_x_max = ue_loc_np[:, 0] >= max_x
+        hit_y_min = ue_loc_np[:, 1] <= min_y
+        hit_y_max = ue_loc_np[:, 1] >= max_y
+        ue_loc_np[hit_x_min, 0] = min_x
+        ue_loc_np[hit_x_max, 0] = max_x
+        ue_loc_np[hit_y_min, 1] = min_y
+        ue_loc_np[hit_y_max, 1] = max_y
         ue_vel_np[hit_x_min | hit_x_max, 0] *= -1
         ue_vel_np[hit_y_min | hit_y_max, 1] *= -1
-        ue_loc_np = np.where(np.isfinite(ue_loc_np), ue_loc_np, 0.0) 
+        ue_loc_np = np.where(np.isfinite(ue_loc_np), ue_loc_np, 0.0)
         ue_vel_np = np.where(np.isfinite(ue_vel_np), ue_vel_np, 0.0)
         self.ue_loc.assign(ue_loc_np[np.newaxis,...])
         self.ue_velocities.assign(ue_vel_np[np.newaxis,...])
+        
+        # محاسبه RSRP و تخصیص سلول با حاشیه Hysteresis
+        rsrp_db_np, _, _, _ = self.compute_metrics()  # فقط RSRP را نیاز داریم
+        rsrp_db_tf = tf.convert_to_tensor(rsrp_db_np, dtype=tf.float32)
+        hysteresis_margin_db = 8.0  # حاشیه 3 دسی‌بل
+        rsrp_db_tf = tf.where(rsrp_db_tf < tf.reduce_max(rsrp_db_tf, axis=0, keepdims=True) - hysteresis_margin_db,
+                            -float('inf'), rsrp_db_tf)
+        serving_cell_indices = tf.argmax(rsrp_db_tf, axis=0, output_type=tf.int32)
+        
+        return serving_cell_indices
 
     @tf.function(jit_compile=True)
     def compute_metrics_tf(self, ue_loc_tf, bs_loc_tf, ut_orient_tf, bs_orient_tf, ut_vel_tf, in_state_tf):
@@ -184,31 +240,49 @@ class NetworkEnvironment:
         if self.channel_model_3gpp is None or self.resource_grid is None or not hasattr(self, 'generate_h_freq_layer'):
             print("CRITICAL ERROR: Sionna components not initialized for OFDM-based metrics.")
             return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
-                   self.cell_loads.copy(), self.ue_priorities.copy()
+                self.cell_loads.copy(), self.ue_priorities.copy()
+
         try:
+            # بررسی مقادیر غیرمعتبر (NaN یا Inf)
             if not (tf.reduce_all(tf.math.is_finite(self.ue_loc)) and \
                     tf.reduce_all(tf.math.is_finite(self.bs_loc)) and \
                     tf.reduce_all(tf.math.is_finite(self.ue_velocities))):
                 print("Warning: Invalid UE/BS locations or velocities detected (NaN or Inf). Returning defaults.")
                 return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
-                       self.cell_loads.copy(), self.ue_priorities.copy()
+                    self.cell_loads.copy(), self.ue_priorities.copy()
 
+            # محاسبه معیارها
             rsrp_db_tf, sinr_db_tf = self.compute_metrics_tf(
                 self.ue_loc, self.bs_loc, self.ut_orientations,
                 self.bs_orientations, self.ue_velocities, self.in_state
             )
-            return rsrp_db_tf.numpy(), sinr_db_tf.numpy(), self.cell_loads.copy(), self.ue_priorities.copy()
 
-        except tf.errors.InvalidArgumentError as e: print(f"TensorFlow InvalidArgumentError in compute_metrics: {e}")
-        except tf.errors.ResourceExhaustedError as e: print(f"GPU memory EXCEEDED in compute_metrics: {e}")
-        except AttributeError as ae: print(f"AttributeError during Sionna UMi metric computation: {ae}")
+            # محدود کردن SINR به حداقل -30 dB برای جلوگیری از مقادیر غیرواقعی
+            sinr_db_tf = tf.where(sinr_db_tf < -30.0, -30.0, sinr_db_tf)
+
+            # لاگ‌گذاری برای UEهایی با SINR پایین (اختیاری، برای دیباگ)
+            sinr_db_np = sinr_db_tf.numpy()
+            if np.any(sinr_db_np < -20.0):
+                distances = np.linalg.norm(self.ue_loc.numpy()[0, :, :2] - self.bs_pos_2d[:, None], axis=2)
+                for ue_idx in range(NUM_UES):
+                    if np.any(sinr_db_np[ue_idx] < -20.0):
+                        print(f"UE {ue_idx} SINR: {sinr_db_np[ue_idx]}, Distance: {distances[:, ue_idx]}")
+
+            return rsrp_db_tf.numpy(), sinr_db_np, self.cell_loads.copy(), self.ue_priorities.copy()
+
+        except tf.errors.InvalidArgumentError as e:
+            print(f"TensorFlow InvalidArgumentError in compute_metrics: {e}")
+        except tf.errors.ResourceExhaustedError as e:
+            print(f"GPU memory EXCEEDED in compute_metrics: {e}")
+        except AttributeError as ae:
+            print(f"AttributeError during Sionna UMi metric computation: {ae}")
         except Exception as e:
             print(f"General Uncaught Error during Sionna UMi metric computation: {e}")
             if hasattr(self, 'ue_loc') and hasattr(self, 'bs_loc'):
-                 print(f"Variables at error: ue_loc shape: {self.ue_loc.shape}, bs_loc shape: {self.bs_loc.shape}")
+                print(f"Variables at error: ue_loc shape: {self.ue_loc.shape}, bs_loc shape: {self.bs_loc.shape}")
         
         return np.full((NUM_UES, NUM_CELLS), -200.0), np.full((NUM_UES, NUM_CELLS), -30.0), \
-               self.cell_loads.copy(), self.ue_priorities.copy()
+            self.cell_loads.copy(), self.ue_priorities.copy()
 
     def update_cell_loads(self, assignments):
         self.cell_loads = np.zeros(NUM_CELLS)
@@ -220,7 +294,7 @@ class NetworkEnvironment:
 
 # --- Module 2: Traffic Steering Algorithms ---
 class TrafficSteering:
-    def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.8):
+    def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.4):
         self.algorithm = algorithm; self.rsrp_threshold = rsrp_threshold
         self.hysteresis = hysteresis; self.ttt = ttt; self.load_threshold = load_threshold
         self.prev_assignments = None; self.ttt_targets = {}
@@ -259,7 +333,7 @@ class TrafficSteering:
             for cell_idx in range(NUM_CELLS):
                 sinr_c = 0.5 * np.clip(sinr[ue_idx, cell_idx], -20, 30)
                 load_c = 0.3 * (1.0 - cell_loads[cell_idx]) * 20
-                prio_c = 0.2 * (4.0 - float(priorities[ue_idx])) * 10
+                prio_c = 0.5 * (4.0 - float(priorities[ue_idx])) * 10
                 utilities[cell_idx] = sinr_c + load_c + prio_c
             assignments[ue_idx] = np.argmax(utilities)
         self.prev_assignments = assignments; self.ttt_targets = {}
@@ -277,6 +351,8 @@ class AIFuzzer:
         self.population_size = population_size; self.generations = generations
         self.input_vector_size = NUM_CELLS + NUM_UES * 2 
         self.objective_call_count = 0
+        self.oracle = Oracle(qos_sinr_threshold=2.0, fairness_threshold=0.4, ping_pong_window=12, ping_pong_threshold=2)
+
     def _objective_function(self, inputs, current_assignments, dt_fitness=1.0):
         self.objective_call_count += 1
         original_loads = self.env.cell_loads.copy(); original_positions_tf = tf.identity(self.env.ue_loc)
@@ -294,7 +370,8 @@ class AIFuzzer:
             self.ts.prev_assignments = current_assignments
             new_assignments = self.ts.assign_ues(rsrp, sinr, temp_loads, priorities, dt=dt_fitness)
             num_handovers = np.sum(new_assignments != current_assignments)
-            fitness_score = -float(num_handovers)
+            fairness = self.oracle._jain_fairness(10**(np.clip(sinr[new_assignments, range(NUM_UES)], -30, 30) / 10.0))
+            fitness_score = -float(num_handovers) + 10 * fairness
         finally:
             self.env.cell_loads = original_loads; self.env.ue_loc.assign(original_positions_tf)
             self.ts.prev_assignments = original_ts_prev_assignments; self.ts.ttt_targets = original_ts_ttt_targets
@@ -347,8 +424,7 @@ class RandomFuzzer:
 
 # --- Module 4: Oracle ---
 class Oracle:
-    def __init__(self, ping_pong_window=4, ping_pong_threshold=2, # Adjusted Ping-Pong
-                       qos_sinr_threshold=0.0, fairness_threshold=0.4): # Adjusted thresholds
+    def __init__(self, ping_pong_window=4, ping_pong_threshold=2, qos_sinr_threshold=-5.0, fairness_threshold=0.4):
         self.ping_pong_window = ping_pong_window
         self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold
@@ -365,6 +441,9 @@ class Oracle:
     def evaluate(self, rsrp, sinr, assignments, cell_loads, priorities):
         vulnerabilities_found = []
         num_ping_pongs_detected_this_step = 0
+        ping_pong_ues = []
+        
+        # پینگ‌پنگ
         for ue_idx in range(NUM_UES):
             if ue_idx not in self.handover_history: self.handover_history[ue_idx] = []
             self.handover_history[ue_idx].append(assignments[ue_idx])
@@ -373,60 +452,64 @@ class Oracle:
             
             history = self.handover_history[ue_idx]
             if len(history) == self.ping_pong_window:
-                # A-B-A-B like pattern or frequent changes
-                # Counts unique cells in window, if high relative to window, it's oscillatory
-                # More robust: Check for specific A->B->A like patterns or > X HOs in window
-                # Example: if history[0] == history[2] and history[0] != history[1] and \
-                #    history[1] == history[3] and history[1] != history[2]: # A-B-A-B
-                # For now, a simpler check: if more than X unique cells in window (suggests oscillation)
-                # Or, if number of changes is high
                 changes = 0
                 for i in range(len(history) - 1):
                     if history[i] != history[i+1]:
-                        changes +=1
-                if changes >= self.ping_pong_window -1 : # Max possible changes in a window
-                    num_ping_pongs_detected_this_step +=1
-
-
-        if num_ping_pongs_detected_this_step >= self.ping_pong_threshold:
-            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating")
+                        changes += 1
+                if changes >= self.ping_pong_window - 1:
+                    num_ping_pongs_detected_this_step += 1
+                    ping_pong_ues.append(ue_idx)
         
-        # Use a temporary array for assigned SINR to avoid modifying input 'sinr'
-        # Also, handle cases where assignment index might be out of bounds if NUM_CELLS is small
-        # and assignment somehow gives a larger index (should not happen with argmax)
-        temp_assigned_sinr_list = []
+        if num_ping_pongs_detected_this_step >= self.ping_pong_threshold:
+            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating (UEs: {ping_pong_ues})")
+        
+        # SINR تخصیص‌یافته
+        assigned_sinr_list = []
         for ue_idx in range(NUM_UES):
             assigned_cell_idx = assignments[ue_idx]
-            if 0 <= assigned_cell_idx < NUM_CELLS: # Check if assigned cell index is valid
-                temp_assigned_sinr_list.append(sinr[ue_idx, assigned_cell_idx])
+            if 0 <= assigned_cell_idx < NUM_CELLS:
+                assigned_sinr_list.append(sinr[ue_idx, assigned_cell_idx])
+            else:
+                assigned_sinr_list.append(np.nan)
+        assigned_sinr_np = np.array(assigned_sinr_list)
+        assigned_sinr_finite = assigned_sinr_np[np.isfinite(assigned_sinr_np)]
         
-        assigned_sinr_np = np.array(temp_assigned_sinr_list) if temp_assigned_sinr_list else np.array([])
-
-
-        # QoS for high priority UEs
+        # نقض QoS برای UEهای با اولویت بالا
         high_priority_mask = (priorities == 1)
-        # Filter assigned_sinr_np for only high priority UEs
-        assigned_sinr_hp_ues_list = []
+        assigned_sinr_hp_list = []
+        qos_violation_ues = []
+        qos_violation_values = []
         for i in range(NUM_UES):
-            if high_priority_mask[i]:
-                assigned_cell_idx = assignments[i]
-                if 0 <= assigned_cell_idx < NUM_CELLS:
-                    assigned_sinr_hp_ues_list.append(sinr[i, assigned_cell_idx])
+            if high_priority_mask[i] and np.isfinite(assigned_sinr_np[i]):
+                assigned_sinr_hp_list.append(assigned_sinr_np[i])
+                if assigned_sinr_np[i] < self.qos_sinr_threshold:
+                    qos_violation_ues.append(i)
+                    qos_violation_values.append(assigned_sinr_np[i])
         
-        assigned_sinr_hp_ues_np = np.array(assigned_sinr_hp_ues_list) if assigned_sinr_hp_ues_list else np.array([])
-
-        if assigned_sinr_hp_ues_np.size > 0:
-            avg_sinr_high = np.mean(assigned_sinr_hp_ues_np)
+        assigned_sinr_hp_np = np.array(assigned_sinr_hp_list) if assigned_sinr_hp_list else np.array([])
+        if assigned_sinr_hp_np.size > 0:
+            avg_sinr_high = np.mean(assigned_sinr_hp_np)
             if avg_sinr_high < self.qos_sinr_threshold:
-                vulnerabilities_found.append(f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB (Threshold: {self.qos_sinr_threshold} dB)")
+                vulnerabilities_found.append(
+                    f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB "
+                    f"(Threshold: {self.qos_sinr_threshold} dB, UEs: {qos_violation_ues}, Values: {qos_violation_values})"
+                )
         
-        # Fairness
-        if assigned_sinr_np.size > 0: # Ensure there are values to calculate fairness for
-            clipped_sinr_for_fairness = np.clip(assigned_sinr_np, -30, 30)
+        # ناعدالتی
+        if assigned_sinr_finite.size > 0:
+            clipped_sinr_for_fairness = np.clip(assigned_sinr_finite, -30, 30)
             assigned_sinr_linear = 10**(clipped_sinr_for_fairness / 10.0)
             fairness = self._jain_fairness(assigned_sinr_linear)
             if fairness < self.fairness_threshold:
-                vulnerabilities_found.append(f"Unfairness: Jain Index = {fairness:.2f}")
+                # محاسبه تخصیص منابع برای تحلیل ناعدالتی
+                resources_per_cell = np.zeros(NUM_CELLS)
+                for i, cell_idx in enumerate(assignments):
+                    if 0 <= cell_idx < NUM_CELLS:
+                        resources_per_cell[cell_idx] += 1
+                vulnerabilities_found.append(
+                    f"Unfairness: Jain Index = {fairness:.2f} (Resources per cell: {resources_per_cell.tolist()})"
+                )
+        
         return vulnerabilities_found
 
 # --- Module 5: Main Simulation Loop and Analysis ---
@@ -436,12 +519,12 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     
     shared_env_state = NetworkEnvironment(initial_load=initial_load, scenario_max_speed=max_speed)
 
-    ts_baseline_proto = TrafficSteering(algorithm="baseline")
-    ts_utility_proto = TrafficSteering(algorithm="utility")
+    ts_baseline_proto = TrafficSteering(algorithm="baseline", load_threshold=0.2, ttt=0.3, hysteresis=8.0)
+    ts_utility_proto = TrafficSteering(algorithm="utility", load_threshold=0.2, ttt=0.3, hysteresis=8.0)
     
     # Using tuned Oracle thresholds
-    oracle = Oracle(qos_sinr_threshold=0.0, fairness_threshold=0.4, ping_pong_window=4, ping_pong_threshold=2)
-    results_list = []; dt = 1.0
+    oracle = Oracle(qos_sinr_threshold=2.0, fairness_threshold=0.4, ping_pong_window=10, ping_pong_threshold=2)
+    results_list = []; dt = 0.5
 
     fuzzer_map = {"AI": AIFuzzer, "Random": RandomFuzzer}
     ts_prototypes = {"baseline": ts_baseline_proto, "utility": ts_utility_proto}
@@ -580,29 +663,42 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
 def plot_results(df, output_plot_dir="plots_default"):
-    print("\n--- Generating Plots ---");
-    if df.empty: print("No data to plot."); return
+    print("\n--- Generating Plots ---")
+    if df.empty:
+        print("No data to plot.")
+        return
     os.makedirs(output_plot_dir, exist_ok=True)
     
-    # Added new metrics to the list of what to plot
-    metrics_to_plot = ['vulnerability_count', 'avg_overall_sinr', 'avg_high_prio_sinr', 
-                       'fairness_index', 'handover_count_iter', 'num_ues_below_qos',
-                       'sinr_5th_percentile', 'sinr_95th_percentile', 'load_max', 'load_std']
+    # متریک‌های استاندارد برای پلات‌های خطی
+    metrics_to_plot = [
+        'vulnerability_count', 'avg_overall_sinr', 'avg_high_prio_sinr',
+        'fairness_index', 'handover_count_iter', 'num_ues_below_qos',
+        'sinr_5th_percentile', 'sinr_95th_percentile', 'load_max', 'load_std'
+    ]
     
     for scenario in df['scenario'].unique():
         scenario_df = df[df['scenario'] == scenario].copy()
+        safe_scenario_name = "".join(c for c in scenario if c.isalnum() or c in (' ','_')).rstrip()
+        
+        # محاسبه تعداد آسیب‌پذیری‌ها
         if 'vulnerabilities' in scenario_df.columns:
-             scenario_df['vulnerability_count'] = scenario_df['vulnerabilities'].apply(len)
+            scenario_df['vulnerability_count'] = scenario_df['vulnerabilities'].apply(len)
         else:
-            scenario_df['vulnerability_count'] = 0 # Default if column is missing
+            scenario_df['vulnerability_count'] = 0
 
+        # --- پلات‌های خطی برای متریک‌های استاندارد ---
         for metric in metrics_to_plot:
             if metric not in scenario_df.columns:
                 print(f"Metric '{metric}' not found in results for scenario '{scenario}', skipping plot.")
                 continue
 
-            plt.figure(figsize=(14, 8)) # Wider for potentially more legend items
+            plt.figure(figsize=(14, 8), dpi=100)
             for fuzzer_type in scenario_df['fuzzer_type'].unique():
                 fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
                 for algo in fuzzer_df['algorithm'].unique():
@@ -610,26 +706,140 @@ def plot_results(df, output_plot_dir="plots_default"):
                     if algo_fuzzer_df.empty or metric not in algo_fuzzer_df.columns:
                         continue
                     plot_data = algo_fuzzer_df.groupby('iteration')[metric].mean()
-                    plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', markersize=4, label=f"{algo} ({fuzzer_type})")
+                    plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', 
+                             markersize=4, linewidth=1.5, label=f"{algo} ({fuzzer_type})")
             
-            plt.xlabel('Iteration')
-            plt.ylabel(metric.replace('_', ' ').title())
-            plt.title(f'{metric.replace("_", " ").title()} - Scenario: {scenario}')
-            plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.) # Legend outside plot
-            plt.grid(True)
-            # Ensure SIMULATION_ITERATIONS is accessible, define globally or pass if needed
-            plt.xticks(np.arange(0, SIMULATION_ITERATIONS + 1, step=max(1, SIMULATION_ITERATIONS // 10)))
+            plt.xlabel('Iteration', fontsize=12)
+            plt.ylabel(metric.replace('_', ' ').title(), fontsize=12)
+            plt.title(f'{metric.replace("_", " ").title()} - Scenario: {scenario}', fontsize=14)
+            plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., fontsize=10)
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(np.arange(0, scenario_df['iteration'].max() + 1, step=max(1, scenario_df['iteration'].max() // 10)))
             if metric not in ['avg_overall_sinr', 'avg_high_prio_sinr', 'sinr_5th_percentile', 'sinr_95th_percentile']:
-                 plt.ylim(bottom=0) # For counts, fairness, load_std, load_max
-
-            safe_scenario_name="".join(c for c in scenario if c.isalnum() or c in (' ','_')).rstrip()
-            # Use a more descriptive plot filename including the metric
+                plt.ylim(bottom=0)
+            
             plot_filename = os.path.join(output_plot_dir, f'{safe_scenario_name.replace(" ","_")}_{metric}.png')
             try:
-                plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make space for external legend
-                plt.savefig(plot_filename); print(f"Saved plot: {plot_filename}")
-            except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
+                plt.tight_layout(rect=[0, 0, 0.85, 1])
+                plt.savefig(plot_filename, bbox_inches='tight')
+                print(f"Saved plot: {plot_filename}")
+            except Exception as e:
+                print(f"Error saving plot {plot_filename}: {e}")
             plt.close()
+
+        # --- هیستوگرام SINR ---
+        for fuzzer_type in scenario_df['fuzzer_type'].unique():
+            fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
+            for algo in fuzzer_df['algorithm'].unique():
+                algo_fuzzer_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
+                if algo_fuzzer_df.empty or 'assigned_sinr_list_str' not in algo_fuzzer_df.columns:
+                    continue
+                
+                # استخراج SINRها
+                sinr_values = []
+                for sinr_list_str in algo_fuzzer_df['assigned_sinr_list_str']:
+                    try:
+                        sinr_list = eval(sinr_list_str)
+                        sinr_values.extend([x for x in sinr_list if np.isfinite(x)])
+                    except:
+                        continue
+                
+                if sinr_values:
+                    plt.figure(figsize=(10, 6), dpi=100)
+                    plt.hist(sinr_values, bins=50, range=(-40, 40), density=True, alpha=0.7, color='blue')
+                    plt.xlabel('SINR (dB)', fontsize=12)
+                    plt.ylabel('Density', fontsize=12)
+                    plt.title(f'SINR Distribution - Scenario: {scenario}, Algo: {algo}, Fuzzer: {fuzzer_type}', fontsize=14)
+                    plt.grid(True, linestyle='--', alpha=0.7)
+                    plt.axvline(0, color='red', linestyle='--', label='SINR = 0 dB')
+                    plt.legend(fontsize=10)
+                    
+                    plot_filename = os.path.join(output_plot_dir, 
+                        f'{safe_scenario_name.replace(" ","_")}_sinr_histogram_{algo}_{fuzzer_type}.png')
+                    try:
+                        plt.savefig(plot_filename, bbox_inches='tight')
+                        print(f"Saved plot: {plot_filename}")
+                    except Exception as e:
+                        print(f"Error saving plot {plot_filename}: {e}")
+                    plt.close()
+
+                # --- هیستوگرام SINR برای UEهای با اولویت بالا ---
+                sinr_hp_values = []
+                for index, row in algo_fuzzer_df.iterrows():
+                    try:
+                        sinr_list = eval(row['assigned_sinr_list_str'])
+                        priorities = eval(row['serving_cell_ids_str'])  # فرض می‌کنیم اولویت‌ها در دسترسن
+                        high_priority_mask = np.array(eval(row['serving_cell_ids_str'])) == 1
+                        sinr_hp_values.extend([sinr_list[i] for i in range(len(sinr_list)) 
+                                              if high_priority_mask[i] and np.isfinite(sinr_list[i])])
+                    except:
+                        continue
+                
+                if sinr_hp_values:
+                    plt.figure(figsize=(10, 6), dpi=100)
+                    plt.hist(sinr_hp_values, bins=50, range=(-40, 40), density=True, alpha=0.7, color='green')
+                    plt.xlabel('SINR (dB)', fontsize=12)
+                    plt.ylabel('Density', fontsize=12)
+                    plt.title(f'High-Priority SINR Distribution - Scenario: {scenario}, Algo: {algo}, Fuzzer: {fuzzer_type}', 
+                              fontsize=14)
+                    plt.grid(True, linestyle='--', alpha=0.7)
+                    plt.axvline(0, color='red', linestyle='--', label='SINR = 0 dB')
+                    plt.legend(fontsize=10)
+                    
+                    plot_filename = os.path.join(output_plot_dir, 
+                        f'{safe_scenario_name.replace(" ","_")}_sinr_hp_histogram_{algo}_{fuzzer_type}.png')
+                    try:
+                        plt.savefig(plot_filename, bbox_inches='tight')
+                        print(f"Saved plot: {plot_filename}")
+                    except Exception as e:
+                        print(f"Error saving plot {plot_filename}: {e}")
+                    plt.close()
+
+        # --- پراکندگی SINR در مقابل فاصله از BS ---
+        for fuzzer_type in scenario_df['fuzzer_type'].unique():
+            fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
+            for algo in fuzzer_df['algorithm'].unique():
+                algo_fuzzer_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
+                if algo_fuzzer_df.empty or 'assigned_sinr_list_str' not in algo_fuzzer_df.columns or \
+                   'ue_locations_str' not in algo_fuzzer_df.columns:
+                    continue
+                
+                sinr_values = []
+                distances = []
+                for index, row in algo_fuzzer_df.iterrows():
+                    try:
+                        sinr_list = eval(row['assigned_sinr_list_str'])
+                        ue_locations = np.array(eval(row['ue_locations_str']))
+                        # فرض می‌کنیم bs_pos_2d در دسترس است (از کد اصلی)
+                        bs_pos_2d = np.array([[0,0], [100,0], [50, 86.6]])
+                        for i, sinr in enumerate(sinr_list):
+                            if np.isfinite(sinr):
+                                ue_pos = ue_locations[i, :2]
+                                dist_to_bss = np.linalg.norm(ue_pos - bs_pos_2d, axis=1)
+                                min_distance = np.min(dist_to_bss)
+                                sinr_values.append(sinr)
+                                distances.append(min_distance)
+                    except:
+                        continue
+                
+                if sinr_values and distances:
+                    plt.figure(figsize=(10, 6), dpi=100)
+                    plt.scatter(distances, sinr_values, alpha=0.5, s=20, c='blue')
+                    plt.xlabel('Distance from Nearest BS (m)', fontsize=12)
+                    plt.ylabel('SINR (dB)', fontsize=12)
+                    plt.title(f'SINR vs. Distance - Scenario: {scenario}, Algo: {algo}, Fuzzer: {fuzzer_type}', fontsize=14)
+                    plt.grid(True, linestyle='--', alpha=0.7)
+                    plt.axhline(0, color='red', linestyle='--', label='SINR = 0 dB')
+                    plt.legend(fontsize=10)
+                    
+                    plot_filename = os.path.join(output_plot_dir, 
+                        f'{safe_scenario_name.replace(" ","_")}_sinr_vs_distance_{algo}_{fuzzer_type}.png')
+                    try:
+                        plt.savefig(plot_filename, bbox_inches='tight')
+                        print(f"Saved plot: {plot_filename}")
+                    except Exception as e:
+                        print(f"Error saving plot {plot_filename}: {e}")
+                    plt.close()
 
 def summarize_results(df):
     print("\n--- Results Summary ---")
@@ -718,7 +928,7 @@ def main():
         print("--- No GPU detected by TensorFlow. Running on CPU. ---")
 
     with strategy.scope(): 
-        scenarios_to_run = [('Low Load', 0.3, 5), ('High Load', 0.7, 5), ('High Mobility', 0.5, 10)]
+        scenarios_to_run = [('Low Load', 0.3, 5), ('High Load', 0.7, 5), ('High Mobility', 0.5, 7)]
         all_results_data = []
         for name, load, speed in scenarios_to_run:
             np.random.seed(42); tf.random.set_seed(42)
