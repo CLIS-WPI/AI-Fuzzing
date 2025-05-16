@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
 from collections import Counter
@@ -5,7 +6,7 @@ import ast
 import os
 
 # تنظیمات
-INPUT_CSV = "fuzzing_results_v23_enhanced_metrics_tuned.csv"
+INPUT_CSV = "fuzzing_results_v23_fixed_index_error.csv"  # Updated to match simulation output
 OUTPUT_REPORT = "analysis_report.txt"
 QOS_SINR_THRESHOLD = 2.0
 
@@ -53,7 +54,8 @@ def analyze_ue_positions(df):
                             f"Iter {row['iteration']}, UE {ue_idx}: Distance {min_distance:.2f}m (Edge)"
                         )
                         edge_ues[scenario].append((ue_idx, min_distance))
-            except:
+            except Exception as e:
+                report.append(f"Error processing UE positions in iter {row['iteration']}: {e}")
                 continue
         if edge_ues[scenario]:
             report.append(f"Summary: {len(edge_ues[scenario])} edge UEs detected.")
@@ -70,7 +72,11 @@ def analyze_csv():
     if not os.path.exists(INPUT_CSV):
         return f"Error: File {INPUT_CSV} not found."
 
-    df = pd.read_csv(INPUT_CSV)
+    try:
+        df = pd.read_csv(INPUT_CSV)
+    except Exception as e:
+        return f"Error: Failed to read {INPUT_CSV}: {e}"
+
     report = []
 
     # 1. آمار کلی
@@ -253,14 +259,22 @@ def analyze_csv():
     report.append("")
 
     # ذخیره گزارش
-    with open(OUTPUT_REPORT, 'w', encoding='utf-8') as f:
-        f.write("\n".join(report))
+    try:
+        with open(OUTPUT_REPORT, 'w', encoding='utf-8') as f:
+            f.write("\n".join(report))
+    except Exception as e:
+        return f"Error: Failed to write report to {OUTPUT_REPORT}: {e}"
+
     return df, f"Analysis complete. Report saved to {OUTPUT_REPORT}"
 
 def main():
     """تابع اصلی برای اجرای تحلیل"""
-    df, result = analyze_csv()
-    print(result)
+    result = analyze_csv()
+    if isinstance(result, str):
+        print(result)
+    else:
+        df, message = result
+        print(message)
 
 if __name__ == "__main__":
     main()
