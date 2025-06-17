@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
-# Version 23.1: Fixed NameError for pos_modifier_3d_np in run_simulation.
-#               NUM_UES=15, SIM_ITER=20, FUZZER_GEN=20, FUZZER_POP=5
-#               ResourceGrid: FFT=512, SCS=30kHz, ~38RBs, BW ~13.68MHz
+# Version 23.1: 
 
 # --- Imports ---
 import sionna
@@ -22,13 +20,13 @@ from sionna.phy.channel import GenerateOFDMChannel
 
 # --- Global Constants ---
 NUM_CELLS = 3
-NUM_UES = 15 
+NUM_UES = 30
 BANDWIDTH = 13.68e6 
 CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
-SIMULATION_ITERATIONS = 100 
+SIMULATION_ITERATIONS = 200 
 FUZZER_GENERATIONS = 100
 FUZZER_POPULATION = 10
 
@@ -146,20 +144,37 @@ class NetworkEnvironment:
         self.channel_model_3gpp.set_topology(ut_loc=ue_loc_tf, bs_loc=bs_loc_tf, ut_orientations=ut_orient_tf, bs_orientations=bs_orient_tf, ut_velocities=ut_vel_tf, in_state=in_state_tf)
         h_freq = self.generate_h_freq_layer(batch_size=self.batch_size)
         if ENABLE_DETAILED_METRIC_PRINT: tf.debugging.assert_shapes([(h_freq, (self.batch_size, NUM_UES, 1, NUM_CELLS, 1, self.resource_grid.num_ofdm_symbols, self.resource_grid.fft_size))])
+        
         h_freq_squeezed = tf.squeeze(h_freq, axis=[2, 4])
         avg_channel_power_gain = tf.reduce_mean(tf.abs(h_freq_squeezed)**2, axis=[-2, -1])
         received_power_watts_tf = self.tx_power_watts_total * avg_channel_power_gain
+
+        # --- START OF PROPOSED CHANGE ---
+        # Clip received power to realistic bounds to prevent extreme RSRP/SINR values.
+        # -140 dBm is a common noise floor/sensitivity limit.
+        # -40 dBm is a very strong signal.
+        MIN_POWER_WATTS = 10**((-140 - 30) / 10) 
+        MAX_POWER_WATTS = 10**((-40 - 30) / 10)
+        received_power_watts_tf = tf.clip_by_value(received_power_watts_tf, MIN_POWER_WATTS, MAX_POWER_WATTS)
+        # --- END OF PROPOSED CHANGE ---
+
         received_power_watts_tf = tf.where(tf.math.is_finite(received_power_watts_tf), received_power_watts_tf, tf.zeros_like(received_power_watts_tf))
+
         rp_ue_cell = received_power_watts_tf[0]
         rsrp_db_tf = 10.0 * (tf.math.log(tf.maximum(rp_ue_cell / 1e-3, 1e-20)) / tf.math.log(10.0))
+                
         signal_power_ue_cell = rp_ue_cell 
         total_power_at_ue_u = tf.reduce_sum(rp_ue_cell, axis=1, keepdims=True)
         interference_ue_cell = total_power_at_ue_u - signal_power_ue_cell
         noise_ue_cell = self.noise_power_watts * tf.ones_like(signal_power_ue_cell)
+        
         sinr_linear_tf = tf.math.divide_no_nan(signal_power_ue_cell, interference_ue_cell + noise_ue_cell)
         sinr_db_tf = 10.0 * (tf.math.log(tf.maximum(sinr_linear_tf, 1e-20)) / tf.math.log(10.0))
+        
+        # The floor values here act as a final safety net for display, but the clipping above fixes the core physical value.
         rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
         sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
+        
         return rsrp_db_tf, sinr_db_tf
 
     def compute_metrics(self):
@@ -222,9 +237,18 @@ class TrafficSteering:
         for ue_idx in range(NUM_UES):
             utilities = np.zeros(NUM_CELLS)
             for cell_idx in range(NUM_CELLS):
-                sinr_c = 0.5 * np.clip(sinr[ue_idx, cell_idx], -20, 30)
-                load_c = 0.3 * (1.0 - cell_loads[cell_idx]) * 20
-                prio_c = 0.2 * (4.0 - float(priorities[ue_idx])) * 10
+                # --- START OF PROPOSED CHANGE (Example weight adjustment) ---
+                # Original weights: sinr_w=0.5, load_w=0.3, prio_w=0.2
+                # New weights to prioritize fairness (implicitly via load balancing)
+                sinr_w = 0.4  # Reduce SINR weight
+                load_w = 0.4  # Increase Load balancing weight
+                prio_w = 0.2  # Keep priority weight
+
+                sinr_c = sinr_w * np.clip(sinr[ue_idx, cell_idx], -20, 30)
+                load_c = load_w * (1.0 - cell_loads[cell_idx]) * 20 # *20 is just a scaling factor
+                prio_c = prio_w * (4.0 - float(priorities[ue_idx])) * 10 # *10 is a scaling factor
+                # --- END OF PROPOSED CHANGE ---
+
                 utilities[cell_idx] = sinr_c + load_c + prio_c
             assignments[ue_idx] = np.argmax(utilities)
         self.prev_assignments = assignments; self.ttt_targets = {}
@@ -364,7 +388,7 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
     start_time_scenario = time.time()
     shared_env_state = NetworkEnvironment(initial_load=initial_load, scenario_max_speed=max_speed)
     ts_baseline_proto = TrafficSteering(algorithm="baseline"); ts_utility_proto = TrafficSteering(algorithm="utility")
-    oracle = Oracle(qos_sinr_threshold=0.0, fairness_threshold=0.4, ping_pong_window=4, ping_pong_threshold=2)
+    oracle = Oracle(qos_sinr_threshold=5.0, fairness_threshold=0.4, ping_pong_window=4, ping_pong_threshold=2)
     results_list = []; dt = 1.0
     fuzzer_map = {"AI": AIFuzzer, "Random": RandomFuzzer}
     ts_prototypes = {"baseline": ts_baseline_proto, "utility": ts_utility_proto}
