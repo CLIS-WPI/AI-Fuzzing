@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # Combined AI Fuzzing Script for O-RAN Traffic Steering Vulnerability Analysis
 # Version 23.1: Fixed NameError for pos_modifier_3d_np in run_simulation.
-#             NUM_UES=15, SIM_ITER=20, FUZZER_GEN=20, FUZZER_POP=5
-#             ResourceGrid: FFT=512, SCS=30kHz, ~38RBs, BW ~13.68MHz
+#               NUM_UES=15, SIM_ITER=20, FUZZER_GEN=20, FUZZER_POP=5
+#               ResourceGrid: FFT=512, SCS=30kHz, ~38RBs, BW ~13.68MHz
 
 # --- Imports ---
 import sionna
@@ -29,8 +29,8 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
 SIMULATION_ITERATIONS = 100 
-FUZZER_GENERATIONS = 100  
-FUZZER_POPULATION = 10   
+FUZZER_GENERATIONS = 100
+FUZZER_POPULATION = 10
 
 ENABLE_DETAILED_METRIC_PRINT = False 
 ENABLE_TF_DEVICE_LOGGING = False
@@ -180,12 +180,11 @@ class NetworkEnvironment:
         unique_cells, counts = np.unique(assignments, return_counts=True)
         load_per_ue = 1.0 / NUM_UES
         for cell_idx, count in zip(unique_cells, counts):
-             if 0 <= cell_idx < NUM_CELLS: self.cell_loads[cell_idx] = count * load_per_ue
+            if 0 <= cell_idx < NUM_CELLS: self.cell_loads[cell_idx] = count * load_per_ue
         self.cell_loads = np.clip(self.cell_loads, 0.0, 1.0)
 
 # --- Module 2: Traffic Steering Algorithms ---
 class TrafficSteering:
-    # ... (بدون تغییر نسبت به نسخه 22) ...
     def __init__(self, algorithm="baseline", rsrp_threshold=-100, hysteresis=3, ttt=0.1, load_threshold=0.8):
         self.algorithm = algorithm; self.rsrp_threshold = rsrp_threshold
         self.hysteresis = hysteresis; self.ttt = ttt; self.load_threshold = load_threshold
@@ -210,8 +209,8 @@ class TrafficSteering:
                     active_targets_for_ue.add(cell_idx)
                     current_ttt_targets_state[ue_idx][cell_idx] = current_ttt_targets_state[ue_idx].get(cell_idx, 0) + dt
                     if current_ttt_targets_state[ue_idx][cell_idx] >= self.ttt:
-                         if rsrp[ue_idx, cell_idx] > best_neighbor_quality:
-                             best_neighbor_quality = rsrp[ue_idx, cell_idx]; potential_target = cell_idx
+                        if rsrp[ue_idx, cell_idx] > best_neighbor_quality:
+                            best_neighbor_quality = rsrp[ue_idx, cell_idx]; potential_target = cell_idx
             targets_to_reset = set(current_ttt_targets_state[ue_idx].keys()) - active_targets_for_ue
             for target in targets_to_reset: current_ttt_targets_state[ue_idx].pop(target, None)
             if potential_target != -1:
@@ -239,8 +238,8 @@ class TrafficSteering:
 # --- Module 3: AI Fuzzer ---
 class AIFuzzer: 
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteering, 
-                 population_size=FUZZER_POPULATION, # Now 5
-                 generations=FUZZER_GENERATIONS):  # Now 20
+                 population_size=FUZZER_POPULATION,
+                 generations=FUZZER_GENERATIONS):
         self.env = env; self.ts = ts
         self.population_size = population_size; self.generations = generations
         self.input_vector_size = NUM_CELLS + NUM_UES * 2 
@@ -269,11 +268,11 @@ class AIFuzzer:
         return fitness_score
     def generate_inputs(self, dt=1.0):
         if self.ts.prev_assignments is None:
-             rsrp_init, sinr_init, load_init, prio_init = self.env.compute_metrics()
-             current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
+            rsrp_init, sinr_init, load_init, prio_init = self.env.compute_metrics()
+            current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
         else: current_assignments = self.ts.prev_assignments
         population = []; best_overall_fitness = np.inf
-        for _ in range(self.population_size): # FUZZER_POPULATION is now 5
+        for _ in range(self.population_size):
             load_modifier = np.random.uniform(-0.1, 0.1, NUM_CELLS) 
             position_modifier = np.random.uniform(-5, 5, (NUM_UES, 2)) 
             inputs = np.concatenate([load_modifier, position_modifier.flatten()])
@@ -281,11 +280,11 @@ class AIFuzzer:
         if not population: return np.concatenate([np.random.uniform(-0.1,0.1,NUM_CELLS), np.random.uniform(-5,5,(NUM_UES,2)).flatten()]) # Fallback if pop is empty
         best_overall_individual = population[0].copy()
         self.objective_call_count = 0
-        for gen in range(self.generations): # FUZZER_GENERATIONS is now 20
+        for gen in range(self.generations):
             fitness = [self._objective_function(ind, current_assignments, dt) for ind in population]
             sorted_indices = np.argsort(fitness); current_best_fitness = fitness[sorted_indices[0]]
             if current_best_fitness < best_overall_fitness:
-                 best_overall_fitness = current_best_fitness; best_overall_individual = population[sorted_indices[0]].copy()
+                best_overall_fitness = current_best_fitness; best_overall_individual = population[sorted_indices[0]].copy()
             new_population = [best_overall_individual.copy()]
             num_elites = max(1, int(self.population_size * 0.2)); parent_pool_indices = sorted_indices[:num_elites]
             for _ in range(self.population_size - 1):
@@ -313,7 +312,6 @@ class RandomFuzzer:
 # --- Module 4: Oracle ---
 class Oracle:
     def __init__(self, ping_pong_window=4, ping_pong_threshold=2, qos_sinr_threshold=0.0, fairness_threshold=0.4):
-        # ... (بدون تغییر نسبت به نسخه 22) ...
         self.ping_pong_window = ping_pong_window; self.ping_pong_threshold = ping_pong_threshold
         self.qos_sinr_threshold = qos_sinr_threshold; self.fairness_threshold = fairness_threshold
         self.handover_history = {} 
@@ -326,7 +324,7 @@ class Oracle:
         return sum_val**2 / (len(allocations_cleaned) * sum_sq_val)
     def evaluate(self, rsrp, sinr, assignments, cell_loads, priorities):
         vulnerabilities_found = []; num_ping_pongs_detected_this_step = 0
-        for ue_idx in range(NUM_UES): # NUM_UES is 15
+        for ue_idx in range(NUM_UES):
             if ue_idx not in self.handover_history: self.handover_history[ue_idx] = []
             self.handover_history[ue_idx].append(assignments[ue_idx])
             while len(self.handover_history[ue_idx]) > self.ping_pong_window: self.handover_history[ue_idx].pop(0)
@@ -385,7 +383,7 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
             shared_env_state.update_cell_loads(ts_instance.prev_assignments)
             total_handovers_in_run = 0
 
-            for iteration in range(SIMULATION_ITERATIONS): # SIMULATION_ITERATIONS is 20
+            for iteration in range(SIMULATION_ITERATIONS):
                 assignments_at_start_of_iter = ts_instance.prev_assignments.copy()
                 fuzzed_inputs = fuzzer.generate_inputs(dt)
                 load_modifier = fuzzed_inputs[:NUM_CELLS]
@@ -399,8 +397,11 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
                 current_ue_loc_np = shared_env_state.ue_loc.numpy()
                 modified_ue_loc_np = current_ue_loc_np + pos_modifier_3d_np[np.newaxis,...] 
                 shared_env_state.ue_loc.assign(modified_ue_loc_np)
+                
                 shared_env_state.update_ue_positions_and_velocities(dt)
+                
                 rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
+                
                 new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt)
                 handovers_this_step = np.sum(new_assignments != assignments_at_start_of_iter)
                 total_handovers_in_run += handovers_this_step
@@ -418,18 +419,17 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
                         assigned_rsrp_list.append(np.nan); assigned_sinr_list.append(np.nan)
                 assigned_sinr_np_finite = np.array([s for s in assigned_sinr_list if pd.notna(s)])
                 
-                # ... (بقیه محاسبات معیارها و results_list.append مثل نسخه 22)
                 num_ues_below_qos_iter = np.sum(assigned_sinr_np_finite < oracle.qos_sinr_threshold)
                 sinr_5th_p = np.percentile(assigned_sinr_np_finite, 5) if assigned_sinr_np_finite.size > 0 else np.nan
                 sinr_50th_p = np.median(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan
                 sinr_95th_p = np.percentile(assigned_sinr_np_finite, 95) if assigned_sinr_np_finite.size > 0 else np.nan
                 load_min_iter = np.min(shared_env_state.cell_loads); load_max_iter = np.max(shared_env_state.cell_loads); load_std_iter = np.std(shared_env_state.cell_loads)
-                fuzzed_lm_str = str(load_modifier.tolist()); fuzzed_pm_str = str(position_modifier_2d.tolist()) # position_modifier_2d is already a list of lists after reshape
+                fuzzed_lm_str = str(load_modifier.tolist()); fuzzed_pm_str = str(position_modifier_2d.tolist())
                 avg_overall_sinr_iter = np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan
                 priorities_iter = shared_env_state.ue_priorities; high_priority_mask_iter = (priorities_iter == 1)
                 
                 assigned_sinr_hp_iter_list = []
-                for i in range(NUM_UES): # Ensure NUM_UES matches length of high_priority_mask_iter and assigned_sinr_list
+                for i in range(NUM_UES):
                     if high_priority_mask_iter[i] and i < len(assigned_sinr_list) and pd.notna(assigned_sinr_list[i]):
                         assigned_sinr_hp_iter_list.append(assigned_sinr_list[i])
                 avg_high_prio_sinr_iter = np.mean(assigned_sinr_hp_iter_list) if assigned_sinr_hp_iter_list else np.nan
@@ -452,26 +452,21 @@ def run_simulation(scenario_name, initial_load=0.3, max_speed=5):
                 })
 
                 if (iteration + 1) % (SIMULATION_ITERATIONS // 10 or 1) == 0 :
-                     print(f"    Fuzzer: {fuzzer_name}, Algo: {actual_algo_name}, Scenario: {scenario_name}, Iter: {iteration + 1}/{SIMULATION_ITERATIONS} done.")
+                    print(f"      Fuzzer: {fuzzer_name}, Algo: {actual_algo_name}, Scenario: {scenario_name}, Iter: {iteration + 1}/{SIMULATION_ITERATIONS} done.")
             
             avg_ho_rate_per_iter = total_handovers_in_run / SIMULATION_ITERATIONS if SIMULATION_ITERATIONS > 0 else 0
-            print(f"    Avg HO rate for {actual_algo_name} with {fuzzer_name}: {avg_ho_rate_per_iter:.2f} HOs/iteration")
+            print(f"      Avg HO rate for {actual_algo_name} with {fuzzer_name}: {avg_ho_rate_per_iter:.2f} HOs/iteration")
             end_time_algo = time.time(); print(f"--- Algorithm {actual_algo_name} with {fuzzer_name} Fuzzer finished in {end_time_algo - start_time_algo:.2f} seconds ---")
     
     end_time_scenario = time.time(); print(f"--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     return results_list
 
 def plot_results(df, output_plot_dir="plots_default"): 
-    # (Identical to version 22)
-    # ... (بدون تغییر) ...
     print("\n--- Generating Plots ---");
     if df.empty: print("No data to plot."); return
     os.makedirs(output_plot_dir, exist_ok=True)
     metrics_to_plot = ['vulnerability_count', 'avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 'handover_count_iter', 'num_ues_below_qos', 'sinr_5th_percentile', 'sinr_95th_percentile', 'load_max', 'load_std']
     for scenario in df['scenario'].unique():
-        # Create a figure for each scenario, then plot all metrics for that scenario
-        # This was creating too many figures, let's adjust to one figure per metric, with scenarios as subplots or colors if simple
-        # For now, keeping the original logic: one plot file per metric per scenario.
         scenario_df = df[df['scenario'] == scenario].copy()
         if 'vulnerabilities' in scenario_df.columns: scenario_df['vulnerability_count'] = scenario_df['vulnerabilities'].apply(len)
         else: scenario_df['vulnerability_count'] = 0
@@ -479,7 +474,7 @@ def plot_results(df, output_plot_dir="plots_default"):
         for metric in metrics_to_plot:
             if metric not in scenario_df.columns: print(f"Metric '{metric}' not found, skipping plot for {scenario}."); continue
             
-            plt.figure(figsize=(14, 8)) # One figure per metric-scenario combination
+            plt.figure(figsize=(14, 8))
             plot_title = f'{metric.replace("_", " ").title()} over Iterations - Scenario: {scenario}'
             plt.title(plot_title)
 
@@ -489,15 +484,14 @@ def plot_results(df, output_plot_dir="plots_default"):
                     algo_fuzzer_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
                     if algo_fuzzer_df.empty or metric not in algo_fuzzer_df.columns: continue
                     
-                    # Ensure iteration is the index for plotting time series
                     if 'iteration' in algo_fuzzer_df.columns:
                         plot_data = algo_fuzzer_df.set_index('iteration')[metric].dropna()
                         if not plot_data.empty:
-                             plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', markersize=3, alpha=0.7, label=f"{algo} ({fuzzer_type})")
-                    else: # Fallback if iteration isn't a column, group and mean (less ideal for time series)
+                            plt.plot(plot_data.index, plot_data.values, marker='o', linestyle='-', markersize=3, alpha=0.7, label=f"{algo} ({fuzzer_type})")
+                    else:
                         plot_data_grouped = algo_fuzzer_df.groupby(np.arange(len(algo_fuzzer_df)))[metric].mean()
                         if not plot_data_grouped.empty:
-                             plt.plot(plot_data_grouped.index, plot_data_grouped.values, marker='o', linestyle='-', markersize=3, alpha=0.7, label=f"{algo} ({fuzzer_type}) (by row index)")
+                            plt.plot(plot_data_grouped.index, plot_data_grouped.values, marker='o', linestyle='-', markersize=3, alpha=0.7, label=f"{algo} ({fuzzer_type}) (by row index)")
 
 
             plt.xlabel('Iteration'); plt.ylabel(metric.replace('_', ' ').title())
@@ -506,45 +500,46 @@ def plot_results(df, output_plot_dir="plots_default"):
             if metric not in ['avg_overall_sinr', 'avg_high_prio_sinr', 'sinr_5th_percentile', 'sinr_95th_percentile']: plt.ylim(bottom=0)
             safe_scenario_name="".join(c for c in scenario if c.isalnum() or c in (' ','_')).rstrip()
             plot_filename = os.path.join(output_plot_dir, f'{safe_scenario_name.replace(" ","_")}_{metric}.png')
-            try: plt.tight_layout(rect=[0, 0, 0.85, 1]); plt.savefig(plot_filename); print(f"Saved plot: {plot_filename}")
-            except Exception as e: print(f"Error saving plot {plot_filename}: {e}")
-            plt.close() 
-        # plt.close('all') # Close scenario figure - this was closing too early
+            try: 
+                plt.tight_layout(rect=[0, 0, 0.85, 1])
+                plt.savefig(plot_filename)
+                print(f"Saved plot: {plot_filename}")
+            except Exception as e: 
+                print(f"Error saving plot {plot_filename}: {e}")
+            plt.close()
 
 def summarize_results(df): 
-    # (Identical to version 22)
-    # ... (بدون تغییر) ...
     print("\n--- Results Summary ---")
     if df.empty: print("No results to summarize."); return
     if 'vulnerabilities' in df.columns:
         all_vuln_strings = [v for sl in df['vulnerabilities'].dropna() for v in sl if isinstance(v, str)]
         overall_counts = Counter(all_vuln_strings); print("Overall Vulnerability Counts (All Fuzzers & Algorithms):");
-        if not overall_counts: print("  No vulnerabilities detected overall.")
+        if not overall_counts: print("   No vulnerabilities detected overall.")
         else:
-            for vuln_str, count in overall_counts.most_common(): print(f"  '{vuln_str}': {count}")
-    else: print("  'vulnerabilities' column not found for overall summary.")
+            for vuln_str, count in overall_counts.most_common(): print(f"   '{vuln_str}': {count}")
+    else: print("   'vulnerabilities' column not found for overall summary.")
     print("-" * 40)
     for scenario in df['scenario'].unique():
         print(f"\nScenario: {scenario}"); scenario_data = df[df['scenario'] == scenario]
         for fuzzer_type in scenario_data['fuzzer_type'].unique():
-            print(f"  Fuzzer Type: {fuzzer_type}"); fuzzer_data = scenario_data[scenario_data['fuzzer_type'] == fuzzer_type]
+            print(f"   Fuzzer Type: {fuzzer_type}"); fuzzer_data = scenario_data[scenario_data['fuzzer_type'] == fuzzer_type]
             for algo in fuzzer_data['algorithm'].unique():
-                print(f"    Algorithm: {algo}"); algo_fuzzer_df = fuzzer_data[fuzzer_data['algorithm'] == algo]
+                print(f"      Algorithm: {algo}"); algo_fuzzer_df = fuzzer_data[fuzzer_data['algorithm'] == algo]
                 if 'vulnerabilities' in algo_fuzzer_df.columns:
                     algo_vuln_strings = [v for sl in algo_fuzzer_df['vulnerabilities'].dropna() for v in sl if isinstance(v,str)]
-                    if not algo_vuln_strings: print("      No vulnerabilities detected.")
+                    if not algo_vuln_strings: print("         No vulnerabilities detected.")
                     else:
                         algo_counts = Counter(algo_vuln_strings)
-                        for vuln_str, count in algo_counts.most_common(5): print(f"      '{vuln_str}': {count} occurrences")
-                else: print("      'vulnerabilities' column not found for this group.")
+                        for vuln_str, count in algo_counts.most_common(5): print(f"         '{vuln_str}': {count} occurrences")
+                else: print("         'vulnerabilities' column not found for this group.")
                 new_metrics_to_summarize = ['avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 'handover_count_iter', 'num_ues_below_qos', 'sinr_5th_percentile', 'sinr_50th_percentile', 'sinr_95th_percentile', 'load_min', 'load_max', 'load_std']
                 for metric in new_metrics_to_summarize:
                     if metric in algo_fuzzer_df.columns:
                         try:
                             mean_metric = algo_fuzzer_df[metric].mean(); std_metric = algo_fuzzer_df[metric].std()
                             min_metric = algo_fuzzer_df[metric].min(); max_metric = algo_fuzzer_df[metric].max()
-                            print(f"      Avg {metric.replace('_', ' ')}: {mean_metric:.2f} (Std: {std_metric:.2f}, Min: {min_metric:.2f}, Max: {max_metric:.2f})")
-                        except pd.errors.DataError: print(f"      Metric '{metric}' contains non-numeric data.")
+                            print(f"         Avg {metric.replace('_', ' ')}: {mean_metric:.2f} (Std: {std_metric:.2f}, Min: {min_metric:.2f}, Max: {max_metric:.2f})")
+                        except pd.errors.DataError: print(f"         Metric '{metric}' contains non-numeric data.")
     print("\n--- End Summary ---")
 
 def main():
@@ -572,9 +567,13 @@ def main():
     if not all_results_data: print("Simulation produced no results."); return
     results_df = pd.DataFrame(all_results_data)
     csv_filename = f'fuzzing_results_{SCRIPT_VERSION_NAME}.csv'; plot_dir = f"plots_{SCRIPT_VERSION_NAME}"
-    try: results_df.to_csv(csv_filename, index=False, encoding='utf-8'); print(f"\n--- Results saved to {csv_filename} ---")
-    except Exception as e: print(f"Error saving results to CSV {csv_filename}: {e}")
-    summarize_results(results_df); plot_results(results_df, plot_dir)
+    try: 
+        results_df.to_csv(csv_filename, index=False, encoding='utf-8')
+        print(f"\n--- Results saved to {csv_filename} ---")
+    except Exception as e: 
+        print(f"Error saving results to CSV {csv_filename}: {e}")
+    summarize_results(results_df)
+    plot_results(results_df, plot_dir)
     end_time_main = time.time()
     print(f"\n--- Simulation Finished in {end_time_main - start_time_main:.2f} seconds ---")
 
