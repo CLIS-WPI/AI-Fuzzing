@@ -18,9 +18,9 @@ CSV_FILEPATH = 'fuzzing_results_v23_1_small_fast_fixed.csv'
 ANALYSIS_PLOT_DIR = f"analysis_output_{os.path.splitext(os.path.basename(CSV_FILEPATH))[0]}_v5_4_run"
 SUMMARY_CSV_FILENAME = f"diagnostic_summary_{os.path.splitext(os.path.basename(CSV_FILEPATH))[0]}.csv"
 
-SIMULATION_ITERATIONS = 100  # Expected iterations, updated from CSV
+SIMULATION_ITERATIONS = 200  # Expected iterations, updated from CSV
 BS_LOCATIONS_2D = np.array([[0,0], [100,0], [50, 86.6]])  # 3GPP-compliant BS positions
-NUM_UES = 15  # Matches simulation v23.1
+NUM_UES = 30  # Matches simulation v23.1
 BANDWIDTH_FOR_ANALYSIS = 13.68e6  # Matches v23.1 for accurate noise calculation
 NOISE_POWER_WATTS_ANALYSIS = 10**((-174 - 30) / 10) * BANDWIDTH_FOR_ANALYSIS
 
