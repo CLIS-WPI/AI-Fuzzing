@@ -1,557 +1,326 @@
 # -*- coding: utf-8 -*-
 # Analysis Script for O-RAN Fuzzing Results
-# Version 5.4: Optimized for article, key plots only, statistical tests, terminal outputs
-# Changes from v5.3: Added t-test and ANOVA, reduced to key plots with high quality, improved docs
+# Version 9.0: Enhanced for IEEE Publication Quality
+# - Refined plot styles, fonts, and colors.
+# - Improved layout and legend placement for clarity.
+# - Optimized for vector graphics (PDF) and high-resolution output (PNG).
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.font_manager
 import seaborn as sns
 import numpy as np
 import ast
-from collections import Counter
 import os
-from scipy.stats import ttest_ind, f_oneway
-import uuid
+from scipy.stats import ttest_ind
 
-# --- Configuration ---
-CSV_FILEPATH = 'fuzzing_results_v23_1_small_fast_fixed.csv' 
-ANALYSIS_PLOT_DIR = f"analysis_output_{os.path.splitext(os.path.basename(CSV_FILEPATH))[0]}_v5_4_run"
-SUMMARY_CSV_FILENAME = f"diagnostic_summary_{os.path.splitext(os.path.basename(CSV_FILEPATH))[0]}.csv"
+# --- Constants for easy configuration ---
+# NEW: Define output formats as a constant
+OUTPUT_FORMATS = ['pdf', 'png']
+# NEW: Define a colorblind-friendly palette
+COLOR_PALETTE_CATEGORICAL = 'colorblind'
+COLOR_PALETTE_SEQUENTIAL = 'viridis' # Viridis is also a good, perceptible choice
 
-SIMULATION_ITERATIONS = 200  # Expected iterations, updated from CSV
-BS_LOCATIONS_2D = np.array([[0,0], [100,0], [50, 86.6]])  # 3GPP-compliant BS positions
-NUM_UES = 30  # Matches simulation v23.1
-BANDWIDTH_FOR_ANALYSIS = 13.68e6  # Matches v23.1 for accurate noise calculation
-NOISE_POWER_WATTS_ANALYSIS = 10**((-174 - 30) / 10) * BANDWIDTH_FOR_ANALYSIS
+def get_ieee_font():
+    """Checks for Times New Roman font, falling back to a generic serif font."""
+    available_fonts = [f.name for f in matplotlib.font_manager.fontManager.ttflist]
+    return 'Times New Roman' if 'Times New Roman' in available_fonts else 'serif'
 
-# --- Global Diagnostic Flags ---
-FLAGS = {
-    "data_loading_error": False, "simulation_incomplete": False,
-    "extreme_low_5th_perc_sinr_found": False, "extreme_high_95th_perc_sinr_found": False,
-    "very_low_individual_ue_sinr_found": False, "very_high_individual_ue_sinr_found": False,
-    "predominant_qos_violations": False, "few_ping_pongs_in_high_mobility": False,
-    "ai_fuzzer_more_severe_qos": False, 
-    "significant_ts_algo_difference_vuln": False,
-    "significant_fuzzer_difference_vuln": False,
-    "high_handover_rate_overall": False,
-    "very_low_fairness_overall": False,
-    "suspiciously_high_95th_percentile_sinr_values_present": False,
-    "rsrp_values_suspiciously_high": False,
-    "rsrp_values_at_floor": False,
-}
-# Thresholds for flags
-LOW_SINR_PERCENTILE_THRESHOLD = -20.0 
-HIGH_SINR_PERCENTILE_THRESHOLD = 55.0
-INDIVIDUAL_EXTREME_LOW_SINR_THRESHOLD = -30.0
-INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD = 65.0 
-HIGH_HO_RATE_THRESHOLD = 15.0 
-LOW_FAIRNESS_THRESHOLD_OVERALL = 0.3
-SIGNIFICANCE_LEVEL_P_VALUE = 0.05
-SUSPICIOUS_RSRP_THRESHOLD_DBM = 35.0
+def setup_plot_style():
+    """Sets a professional, publication-ready style for all plots (IEEE-centric)."""
+    # CHANGED: More specific styling for IEEE papers
+    sns.set_context("paper", font_scale=1.6) # Slightly larger font scale for readability
+    sns.set_style("whitegrid")
+    
+    plt.rcParams.update({
+        'font.family': get_ieee_font(),
+        'font.weight': 'normal', # Normal weight is often clearer than bold
+        'axes.labelweight': 'bold', # Make axis labels bold for emphasis
+        'axes.titleweight': 'bold', # Make titles bold
+        'axes.labelsize': 14,
+        'axes.titlesize': 16,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12,
+        'legend.title_fontsize': 13,
+        'figure.dpi': 300, # NEW: Set DPI for rasterized images
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'grid.linestyle': '--', # Use dashed lines for the grid
+        'grid.linewidth': 0.5, # Finer grid lines
+        'lines.linewidth': 2.0, # NEW: Thicker lines for CDFs/line plots
+        'lines.markersize': 8, # NEW: Larger markers for scatter plots
+    })
 
-def parse_list_string_column(series, column_name_for_debug="Unknown"):
-    """Parse stringified list columns in CSV, handling NaN and errors."""
+def parse_list_column(series):
+    """Safely parse stringified list columns."""
     parsed_list = []
-    for item_idx, item in enumerate(series):
+    for item in series:
         if isinstance(item, str):
             try:
-                stripped_item = item.strip()
-                if (stripped_item.startswith('[') and stripped_item.endswith(']')) or \
-                   (stripped_item.startswith('{') and stripped_item.endswith('}')):
-                    parsed_list.append(ast.literal_eval(stripped_item))
-                else:
-                    parsed_list.append(np.nan) 
+                parsed_list.append(ast.literal_eval(item))
             except (ValueError, SyntaxError):
-                parsed_list.append(np.nan) 
-        elif pd.isna(item) and column_name_for_debug == 'vulnerabilities':
+                parsed_list.append([])
+        elif pd.isna(item):
             parsed_list.append([])
         else:
             parsed_list.append(item)
     return parsed_list
 
 def load_and_preprocess_data(csv_filepath):
-    """Load and preprocess CSV data, infer iterations and UE count."""
-    global FLAGS, SIMULATION_ITERATIONS, NUM_UES
-    print(f"Loading data from: {csv_filepath}")
+    """Loads and prepares the simulation data for analysis."""
     if not os.path.exists(csv_filepath):
-        print(f"ERROR: CSV file not found at {csv_filepath}")
-        FLAGS["data_loading_error"] = True
+        print(f"ERROR: CSV file not found at '{csv_filepath}'")
         return None
-    try:
-        df = pd.read_csv(csv_filepath)
-        print(f"Data loaded successfully. Shape: {df.shape}")
-        if 'iteration' in df.columns and not df['iteration'].empty:
-            max_iter = df['iteration'].max()
-            if pd.notna(max_iter):
-                SIMULATION_ITERATIONS = int(max_iter) + 1
-                print(f"Inferred SIMULATION_ITERATIONS from CSV: {SIMULATION_ITERATIONS}")
-                if SIMULATION_ITERATIONS < 50:
-                    FLAGS["simulation_incomplete"] = True
-        else:
-            FLAGS["simulation_incomplete"] = True
-            print("Warning: Could not determine max iteration.")
+    
+    print(f"Loading data from {csv_filepath}...")
+    df = pd.read_csv(csv_filepath)
+    
+    for col in ['vulnerabilities', 'ue_locations_str', 'assigned_sinr_list_str']:
+        if col in df.columns:
+            df[col] = parse_list_column(df[col])
+            
+    df['vulnerability_count'] = df['vulnerabilities'].apply(len)
+    
+    if 'algorithm' in df.columns and 'fuzzer_type' in df.columns:
+        df['plot_hue'] = df['algorithm'] + ' (' + df['fuzzer_type'] + ')'
         
-        if 'serving_cell_ids_str' in df.columns and not df['serving_cell_ids_str'].empty:
-            try:
-                first_valid_list = next(item for item in df['serving_cell_ids_str'] if isinstance(item, str) and item.startswith('['))
-                inferred_ues = len(ast.literal_eval(first_valid_list))
-                if inferred_ues != NUM_UES:
-                    print(f"Warning: Inferred NUM_UES ({inferred_ues}) differs from default ({NUM_UES})")
-            except (StopIteration, ValueError, SyntaxError):
-                print(f"Error inferring NUM_UES, using default: {NUM_UES}")
-
-    except Exception as e:
-        print(f"Error loading CSV: {e}")
-        FLAGS["data_loading_error"] = True
-        return None
-    str_list_cols = ['cell_loads_list_str', 'ue_locations_str', 'serving_cell_ids_str', 
-                     'assigned_rsrp_list_str', 'assigned_sinr_list_str', 
-                     'fuzzed_load_modifier_str', 'fuzzed_pos_modifier_str', 'vulnerabilities']
-    for col in str_list_cols:
-        if col in df.columns:
-            df[col] = parse_list_string_column(df[col], column_name_for_debug=col)
-        else:
-            print(f"Warning: Expected column '{col}' not found.")
-    if 'vulnerabilities' in df.columns:
-        df['vulnerabilities'] = df['vulnerabilities'].apply(
-            lambda x: [str(v) for v in x] if isinstance(x, list) else ([] if pd.isna(x) else [str(x)]))
-        df['vulnerability_count'] = df['vulnerabilities'].apply(len)
-    else:
-        df['vulnerability_count'] = 0
-    numeric_metrics_to_check = ['avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 
-                               'handover_count_iter', 'num_ues_below_qos', 'sinr_5th_percentile', 
-                               'sinr_50th_percentile', 'sinr_95th_percentile', 'load_min', 
-                               'load_max', 'load_std']
-    for col in numeric_metrics_to_check:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 
-def overall_summary_stats(df):
-    """Print summary statistics for numeric columns."""
-    global FLAGS
-    if df is None:
-        return
-    print("\n--- Dataframe Info ---")
-    df.info(verbose=True, show_counts=True)
-    print("\n--- Descriptive Statistics (Numeric Columns) ---")
-    numeric_cols = df.select_dtypes(include=np.number).columns
-    if not numeric_cols.empty:
-        desc_stats = df[numeric_cols].describe().transpose()
-        print(desc_stats.to_string())
-        if 'fairness_index' in desc_stats.index and pd.notna(desc_stats.loc['fairness_index', 'mean']) and desc_stats.loc['fairness_index', 'mean'] < LOW_FAIRNESS_THRESHOLD_OVERALL:
-            FLAGS["very_low_fairness_overall"] = True
-        if 'handover_count_iter' in desc_stats.index and pd.notna(desc_stats.loc['handover_count_iter', 'mean']) and desc_stats.loc['handover_count_iter', 'mean'] > HIGH_HO_RATE_THRESHOLD:
-            FLAGS["high_handover_rate_overall"] = True
-        if 'sinr_95th_percentile' in desc_stats.index and pd.notna(desc_stats.loc['sinr_95th_percentile', 'mean']) and desc_stats.loc['sinr_95th_percentile', 'mean'] > HIGH_SINR_PERCENTILE_THRESHOLD + 10:
-            FLAGS["suspiciously_high_95th_percentile_sinr_values_present"] = True
-    else:
-        print("No numeric columns found.")
-    print("\n--- Missing Values Per Column (if any) ---")
-    missing = df.isnull().sum()
-    print(missing[missing > 0].to_string() if missing.any() else "No missing values found.")
+def plot_vulnerability_breakdown(df, output_dir):
+    """Generate clean multi-facet vulnerability bar plot without legend and with optimal layout."""
+    print("Generating optimized vulnerability breakdown plot...")
 
-def analyze_vulnerabilities(df, output_dir):
-    """Analyze vulnerabilities, perform statistical tests, and generate key plot."""
-    global FLAGS
-    if df is None or 'vulnerabilities' not in df.columns:
+    required_cols = {'vulnerabilities', 'algorithm', 'fuzzer_type', 'scenario'}
+    if not required_cols.issubset(df.columns):
+        print("Skipping plot: required columns missing.")
         return
-    os.makedirs(output_dir, exist_ok=True)
-    print("\n--- Vulnerability Analysis ---")
-    all_vulns_flat_list = [str(vuln) for sublist in df['vulnerabilities'].dropna() for vuln in sublist]
-    vuln_counts = Counter(all_vulns_flat_list)
-    print("Overall Vulnerability Counts:")
-    if not vuln_counts:
-        print("  No vulnerabilities detected.")
-    else:
-        for v_type, count in vuln_counts.most_common():
-            print(f"  {v_type}: {count}")
-    total_vulns = sum(vuln_counts.values())
-    if total_vulns > 0:
-        qos_count = sum(count for v_type, count in vuln_counts.items() if "QoS Violation" in v_type)
-        if (qos_count / total_vulns) > 0.5:
-            FLAGS["predominant_qos_violations"] = True
-    if 'scenario' in df.columns and 'High Mobility' in df['scenario'].unique():
-        hm_df = df[df['scenario'] == 'High Mobility'].copy()
-        if not hm_df.empty and 'vulnerabilities' in hm_df.columns:
-            hm_df['vulnerabilities'] = hm_df['vulnerabilities'].apply(
-                lambda x: [str(v) for v in x] if isinstance(x, list) else [])
-            hm_all_vulns_flat = [vuln for sublist in hm_df['vulnerabilities'].dropna() if isinstance(sublist, list) for vuln in sublist]
-            hm_vuln_counts_scenario = Counter(hm_all_vulns_flat)
-            hm_ping_pong_count = sum(count for v_type, count in hm_vuln_counts_scenario.items() if "Ping-Pong" in v_type)
-            hm_qos_count = sum(count for v_type, count in hm_vuln_counts_scenario.items() if "QoS Violation" in v_type)
-            iters_with_any_vuln_hm = len(hm_df[hm_df['vulnerability_count'] > 0])
-            if iters_with_any_vuln_hm > 0 and hm_ping_pong_count < (0.15 * iters_with_any_vuln_hm) and hm_qos_count > (0.3 * iters_with_any_vuln_hm):
-                FLAGS["few_ping_pongs_in_high_mobility"] = True
-    # Statistical test: t-test for fuzzer types
-    if 'fuzzer_type' in df.columns and 'vulnerability_count' in df.columns:
-        ai_vulns = df[df['fuzzer_type'] == 'AI']['vulnerability_count'].dropna()
-        random_vulns = df[df['fuzzer_type'] == 'Random']['vulnerability_count'].dropna()
-        if len(ai_vulns) > 1 and len(random_vulns) > 1:
-            t_stat, p_val = ttest_ind(ai_vulns, random_vulns, equal_var=False)
-            print(f"\nT-test for vulnerability count (AI vs Random): t-stat = {t_stat:.4f}, p-value = {p_val:.4f}")
-            if p_val < SIGNIFICANCE_LEVEL_P_VALUE:
-                FLAGS["significant_fuzzer_difference_vuln"] = True
-    # Statistical test: ANOVA for algorithms
-    if all(col in df.columns for col in ['scenario', 'algorithm', 'vulnerability_count']):
-        grouped = df.groupby(['scenario', 'algorithm'])['vulnerability_count'].apply(list)
-        valid_groups = [g for g in grouped if len(g) > 1]
-        if len(valid_groups) > 1:
-            f_stat, p_val = f_oneway(*valid_groups)
-            print(f"ANOVA for vulnerability count by algorithm: F-stat = {f_stat:.4f}, p-value = {p_val:.4f}")
-            if p_val < SIGNIFICANCE_LEVEL_P_VALUE:
-                FLAGS["significant_ts_algo_difference_vuln"] = True
-    # Key plot: Total vulnerabilities by fuzzer, algorithm, and scenario
-    if all(col in df.columns for col in ['scenario', 'algorithm', 'fuzzer_type', 'vulnerability_count']):
-        try:
-            grouped_vulns = df.groupby(['scenario', 'algorithm', 'fuzzer_type'])['vulnerability_count'].sum().reset_index()
-            if not grouped_vulns.empty:
-                plt.figure(figsize=(12, 6))
-                g = sns.catplot(data=grouped_vulns, x='algorithm', y='vulnerability_count', 
-                                hue='fuzzer_type', col='scenario', kind='bar', height=5, aspect=0.9, 
-                                palette='Set2', legend_out=True)
-                g.fig.suptitle("Total Vulnerabilities by Algorithm, Fuzzer, and Scenario", y=1.02, fontsize=14)
-                g.set_axis_labels("Algorithm", "Total Vulnerabilities")
-                g.set_xticklabels(rotation=30, ha="right")
-                plt.tight_layout(rect=[0, 0, 0.9, 0.95])
-                plot_path = os.path.join(output_dir, "vuln_count_by_algo_fuzzer_scenario.png")
-                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-                print(f"Saved key plot: {plot_path}")
-                plt.close()
-        except Exception as e:
-            print(f"Error generating vulnerability plot: {e}")
 
-def analyze_key_metrics(df):
-    """Print key metric statistics without generating plots."""
-    if df is None:
+    df = df.explode('vulnerabilities').dropna(subset=['vulnerabilities'])
+    if df.empty:
+        print("No vulnerability data available.")
         return
-    print("\n--- Key Metric Analysis ---")
-    key_numerical_metrics = ['avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 
-                            'handover_count_iter', 'num_ues_below_qos', 'sinr_5th_percentile', 
-                            'sinr_50th_percentile', 'sinr_95th_percentile', 'load_min', 
-                            'load_max', 'load_std']
-    for metric in key_numerical_metrics:
-        if metric not in df.columns:
-            print(f"Metric '{metric}' not found.")
-            continue
-        print(f"\nAnalyzing metric: {metric}")
-        try:
-            df[metric] = pd.to_numeric(df[metric], errors='coerce')
-            if df[metric].isnull().all():
-                print(f"All values for metric '{metric}' are NaN.")
-                continue
-            grouped_stats = df.groupby(['scenario', 'fuzzer_type', 'algorithm'])[metric].agg(['mean', 'std', 'min', 'max'])
-            if not grouped_stats.empty:
-                print(grouped_stats.to_string())
-            else:
-                print(f"No data to aggregate for metric: {metric}")
-        except Exception as e:
-            print(f"Error analyzing metric {metric}: {e}")
 
-def diagnose_extreme_sinr_values(df, low_sinr_col='sinr_5th_percentile', low_sinr_threshold=-20.0, 
-                                high_sinr_col='sinr_95th_percentile', high_sinr_threshold=60.0,
-                                individual_low_thr=-30.0, individual_high_thr=70.0,
-                                num_samples_to_show=3):
-    """Diagnose extreme SINR values and print details."""
-    global FLAGS
-    if df is None:
-        return
-    print(f"\n--- Diagnosing Extreme SINR Values (Low 5th %ile < {low_sinr_threshold}dB, High 95th %ile > {high_sinr_threshold}dB) ---")
-    print(f"--- (Individual UE SINR thresholds: Low < {individual_low_thr}dB, High > {individual_high_thr}dB) ---")
-    context_cols_base = ['scenario', 'iteration', 'fuzzer_type', 'algorithm']
-    if low_sinr_col in df.columns and pd.to_numeric(df[low_sinr_col], errors='coerce').notna().any():
-        df_copy = df.copy()
-        df_copy[low_sinr_col] = pd.to_numeric(df_copy[low_sinr_col], errors='coerce')
-        low_sinr_percentile_cases = df_copy[df_copy[low_sinr_col] < low_sinr_threshold]
-        print(f"\nFound {len(low_sinr_percentile_cases)} instances where '{low_sinr_col}' < {low_sinr_threshold} dB:")
-        if not low_sinr_percentile_cases.empty:
-            FLAGS["extreme_low_5th_perc_sinr_found"] = True
-            print(f"  Details for top {min(num_samples_to_show, len(low_sinr_percentile_cases))} LOWEST 5th Percentile SINR cases:")
-            for index, row in low_sinr_percentile_cases.nsmallest(num_samples_to_show, low_sinr_col).iterrows():
-                print(f"\n    --- Case: Index {index} ---")
-                for col_name in context_cols_base + [low_sinr_col]:
-                    print(f"      {col_name}: {row.get(col_name)}")
-                ue_locations = row.get('ue_locations_str', [])
-                assigned_sinrs = row.get('assigned_sinr_list_str', [])
-                serving_cells = row.get('serving_cell_ids_str', [])
-                assigned_rsrps = row.get('assigned_rsrp_list_str', [])
-                if isinstance(assigned_sinrs, list) and assigned_sinrs:
-                    valid_sinrs_np = np.array([s for s in assigned_sinrs if isinstance(s, (int, float)) and pd.notna(s)])
-                    if valid_sinrs_np.size > 0:
-                        min_sinr_val_in_list = np.min(valid_sinrs_np)
-                        min_sinr_ue_indices = [i for i, s in enumerate(assigned_sinrs) if isinstance(s, (int, float)) and pd.notna(s) and s == min_sinr_val_in_list]
-                        print(f"      Min Individual SINR in this step: {min_sinr_val_in_list:.2f} dB at UE(s) index: {min_sinr_ue_indices[:1]}")
-                        if min_sinr_val_in_list < INDIVIDUAL_EXTREME_LOW_SINR_THRESHOLD:
-                            FLAGS["very_low_individual_ue_sinr_found"] = True
-                        for ue_idx in min_sinr_ue_indices[:1]:
-                            if isinstance(ue_locations, list) and ue_idx < len(ue_locations) and isinstance(ue_locations[ue_idx], list) and len(ue_locations[ue_idx])==2:
-                                ue_pos = ue_locations[ue_idx]
-                                print(f"        UE {ue_idx} Location: {[round(c,1) for c in ue_pos]}")
-                                distances = [np.linalg.norm(np.array(ue_pos) - bs_pos) for bs_pos in BS_LOCATIONS_2D]
-                                print(f"        UE {ue_idx} Distances to BSs: {[f'{d:.1f}m' for d in distances]}")
-                            if isinstance(serving_cells, list) and ue_idx < len(serving_cells):
-                                print(f"        UE {ue_idx} Serving Cell ID: {serving_cells[ue_idx]}")
-                            if isinstance(assigned_rsrps, list) and ue_idx < len(assigned_rsrps) and isinstance(assigned_rsrps[ue_idx], (int, float)) and pd.notna(assigned_rsrps[ue_idx]):
-                                print(f"        UE {ue_idx} Assigned RSRP: {assigned_rsrps[ue_idx]:.2f} dBm")
-                                if assigned_rsrps[ue_idx] <= -199.0:
-                                    FLAGS["rsrp_values_at_floor"] = True
-                                signal_linear = 10**((assigned_rsrps[ue_idx]-30)/10)
-                                sinr_val_ue = assigned_sinrs[ue_idx] if isinstance(assigned_sinrs[ue_idx], (int,float)) and pd.notna(assigned_sinrs[ue_idx]) else np.nan
-                                if pd.notna(sinr_val_ue):
-                                    sinr_linear = 10**(sinr_val_ue/10)
-                                    if sinr_linear != 0 and abs(sinr_linear) > 1e-10:
-                                        i_plus_n_linear = signal_linear / sinr_linear
-                                        i_plus_n_dbm = 10 * np.log10(i_plus_n_linear * 1000) if i_plus_n_linear > 1e-30 else -np.inf
-                                        print(f"        UE {ue_idx} Derived (I+N): {i_plus_n_linear:.2e} W ({i_plus_n_dbm:.2f} dBm vs NoiseFloor: {10*np.log10(NOISE_POWER_WATTS_ANALYSIS*1000):.2f} dBm)")
-                print(f"      Fuzzed Load: {row.get('fuzzed_load_modifier_str')}")
-                print(f"      Vulnerabilities: {row.get('vulnerabilities')}")
-    if high_sinr_col in df.columns and df[high_sinr_col].notna().any():
-        df_copy = df.copy()
-        df_copy[high_sinr_col] = pd.to_numeric(df_copy[high_sinr_col], errors='coerce')
-        high_sinr_percentile_cases = df_copy[df_copy[high_sinr_col] > high_sinr_threshold]
-        print(f"\nFound {len(high_sinr_percentile_cases)} instances where '{high_sinr_col}' > {high_sinr_threshold} dB:")
-        if not high_sinr_percentile_cases.empty:
-            FLAGS["extreme_high_95th_perc_sinr_found"] = True
-            print(f"  Details for top {min(num_samples_to_show, len(high_sinr_percentile_cases))} HIGHEST 95th Percentile SINR cases:")
-            for index, row in high_sinr_percentile_cases.nlargest(num_samples_to_show, high_sinr_col).iterrows():
-                print(f"\n    --- Case: Index {index} ---")
-                for col_name in context_cols_base + [high_sinr_col]:
-                    print(f"      {col_name}: {row.get(col_name)}")
-                ue_locations = row.get('ue_locations_str', [])
-                assigned_sinrs = row.get('assigned_sinr_list_str', [])
-                serving_cells = row.get('serving_cell_ids_str', [])
-                assigned_rsrps = row.get('assigned_rsrp_list_str', [])
-                if isinstance(assigned_sinrs, list) and assigned_sinrs:
-                    valid_sinrs_np = np.array([s for s in assigned_sinrs if isinstance(s, (int, float)) and pd.notna(s)])
-                    if valid_sinrs_np.size > 0:
-                        max_sinr_val_in_list = np.max(valid_sinrs_np)
-                        max_sinr_ue_indices = [i for i, s in enumerate(assigned_sinrs) if isinstance(s, (int, float)) and pd.notna(s) and s == max_sinr_val_in_list]
-                        print(f"      Max Individual SINR in this step: {max_sinr_val_in_list:.2f} dB at UE(s) index: {max_sinr_ue_indices[:1]}")
-                        if max_sinr_val_in_list > INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD:
-                            FLAGS["very_high_individual_ue_sinr_found"] = True
-                        for ue_idx in max_sinr_ue_indices[:1]:
-                            if isinstance(ue_locations, list) and ue_idx < len(ue_locations) and isinstance(ue_locations[ue_idx], list) and len(ue_locations[ue_idx])==2:
-                                ue_pos = ue_locations[ue_idx]
-                                print(f"        UE {ue_idx} Location: {[round(c,1) for c in ue_pos]}")
-                                distances = [np.linalg.norm(np.array(ue_pos) - bs_pos) for bs_pos in BS_LOCATIONS_2D]
-                                print(f"        UE {ue_idx} Distances to BSs: {[f'{d:.1f}m' for d in distances]}")
-                            if isinstance(serving_cells, list) and ue_idx < len(serving_cells):
-                                print(f"        UE {ue_idx} Serving Cell ID: {serving_cells[ue_idx]}")
-                            if isinstance(assigned_rsrps, list) and ue_idx < len(assigned_rsrps) and isinstance(assigned_rsrps[ue_idx],(int,float)) and pd.notna(assigned_rsrps[ue_idx]):
-                                print(f"        UE {ue_idx} Assigned RSRP: {assigned_rsrps[ue_idx]:.2f} dBm")
-                                if assigned_rsrps[ue_idx] > SUSPICIOUS_RSRP_THRESHOLD_DBM:
-                                    FLAGS["rsrp_values_suspiciously_high"] = True
-                                signal_linear = 10**((assigned_rsrps[ue_idx]-30)/10)
-                                sinr_val_ue = assigned_sinrs[ue_idx] if isinstance(assigned_sinrs[ue_idx], (int,float)) and pd.notna(assigned_sinrs[ue_idx]) else np.nan
-                                if pd.notna(sinr_val_ue):
-                                    sinr_linear = 10**(sinr_val_ue/10)
-                                    if sinr_linear != 0 and abs(sinr_linear) > 1e-10:
-                                        i_plus_n_linear = signal_linear / sinr_linear
-                                        i_plus_n_dbm = 10 * np.log10(i_plus_n_linear * 1000) if i_plus_n_linear > 1e-30 else -np.inf
-                                        print(f"        UE {ue_idx} Derived (I+N): {i_plus_n_linear:.2e} W ({i_plus_n_dbm:.2f} dBm vs NoiseFloor: {10*np.log10(NOISE_POWER_WATTS_ANALYSIS*1000):.2f} dBm)")
-                print(f"      Fuzzed Load: {row.get('fuzzed_load_modifier_str')}")
-                print(f"      Vulnerabilities: {row.get('vulnerabilities')}")
+    df['vuln_category'] = df['vulnerabilities'].apply(lambda x: str(x).split(':')[0])
 
-def plot_cdfs(df, output_dir):
-    """Generate CDF plot for sinr_5th_percentile only."""
-    if df is None:
-        print("CDF plotting skipped: DataFrame is None.")
-        return
-    print("\n--- Plotting CDF for sinr_5th_percentile ---")
-    os.makedirs(output_dir, exist_ok=True)
-    metric = 'sinr_5th_percentile'
-    for scenario in df['scenario'].unique():
-        scenario_df = df[df['scenario'] == scenario].copy()
-        if metric not in scenario_df.columns:
-            print(f"  Metric '{metric}' not found for CDF in {scenario}.")
-            continue
-        metric_data_for_plot = pd.to_numeric(scenario_df[metric], errors='coerce').dropna()
-        if metric_data_for_plot.empty:
-            print(f"  No valid data for CDF of '{metric}' in {scenario}.")
-            continue
-        plt.figure(figsize=(10, 6))
-        legend_items_exist = False
-        for algo in scenario_df['algorithm'].unique():
-            for fuzzer in scenario_df['fuzzer_type'].unique():
-                subset_data = scenario_df[(scenario_df['algorithm']==algo) & (scenario_df['fuzzer_type']==fuzzer)][metric].dropna()
-                subset_data_numeric = pd.to_numeric(subset_data, errors='coerce').dropna()
-                if not subset_data_numeric.empty:
-                    sorted_data = np.sort(subset_data_numeric)
-                    yvals = np.arange(1, len(sorted_data) + 1) / float(len(sorted_data))
-                    plt.plot(sorted_data, yvals, linestyle='-', linewidth=2, alpha=0.8, 
-                             label=f'{algo} ({fuzzer})')
-                    legend_items_exist = True
-        if not legend_items_exist:
-            plt.close()
-            print(f"  No data plotted for CDF of '{metric}' in {scenario}.")
-            continue
-        plt.title(f'CDF of 5th Percentile SINR - Scenario: {scenario}', fontsize=14)
-        plt.xlabel('5th Percentile SINR (dB)', fontsize=12)
-        plt.ylabel('Cumulative Probability', fontsize=12)
-        plt.legend(loc='best', fontsize=10)
-        plt.grid(True, which="both", ls="--", linewidth=0.5)
-        q_low = metric_data_for_plot.quantile(0.005)
-        q_high = metric_data_for_plot.quantile(0.995)
-        q_low = -60 if pd.isna(q_low) else q_low
-        q_high = 70 if pd.isna(q_high) else q_high
-        buffer = (q_high - q_low) * 0.1 if (q_high - q_low) > 0 and pd.notna(q_high - q_low) else 10
-        final_min = max(q_low - buffer, -70)
-        final_max = min(q_high + buffer, 70)
-        plt.xlim(final_min, final_max)
-        plt.tight_layout()
-        plot_filename = os.path.join(output_dir, f"CDF_{metric}_{scenario.replace(' ','_')}.png")
-        try:
-            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-            print(f"Saved key plot: {plot_filename}")
-        except Exception as e:
-            print(f"Error saving CDF plot {plot_filename}: {e}")
-        plt.close()
+    # Global style
+    sns.set_theme(style="whitegrid", context="talk", font_scale=1.15)
 
-def generate_summary_csv_with_flags(df, output_filename):
-    """Generate summary CSV with grouped statistics."""
-    global FLAGS 
-    if df is None:
-        print("No data to generate summary CSV.")
-        return
-    print(f"\n--- Generating Summary CSV: {output_filename} ---")
-    summary_list = []
-    numeric_metrics_for_summary = ['avg_overall_sinr', 'avg_high_prio_sinr', 'fairness_index', 
-                                  'handover_count_iter', 'num_ues_below_qos', 'sinr_5th_percentile', 
-                                  'sinr_50th_percentile', 'sinr_95th_percentile', 'load_min', 
-                                  'load_max', 'load_std']
-    if not all(col in df.columns for col in ['scenario', 'fuzzer_type', 'algorithm']):
-        print("Error: Grouping columns missing.")
-        return
-    grouped = df.groupby(['scenario', 'fuzzer_type', 'algorithm'])
-    for name, group in grouped:
-        scenario, fuzzer_type, algorithm = name
-        row = {'scenario': scenario, 'fuzzer_type': fuzzer_type, 'algorithm': algorithm}
-        if 'vulnerabilities' in group.columns:
-            group_vulns_flat = [str(v) for sublist in group['vulnerabilities'].dropna() for v in sublist]
-            group_vuln_counts = Counter(group_vulns_flat)
-            row['total_vuln_events'] = sum(group_vuln_counts.values())
-            row['unique_vuln_types_count'] = len(group_vuln_counts)
-            row['avg_vuln_types_per_trigger_iter'] = group[group['vulnerability_count'] > 0]['vulnerability_count'].mean() if (group['vulnerability_count'] > 0).any() else 0
-            row['count_qos_violations'] = sum(c for v, c in group_vuln_counts.items() if "QoS Violation" in v)
-            row['count_ping_pong'] = sum(c for v, c in group_vuln_counts.items() if "Ping-Pong" in v)
-            row['count_unfairness'] = sum(c for v, c in group_vuln_counts.items() if "Unfairness" in v)
-        else:
-            for key in ['total_vuln_events', 'unique_vuln_types_count', 'avg_vuln_types_per_trigger_iter', 
-                        'count_qos_violations', 'count_ping_pong', 'count_unfairness']:
-                row[key] = 0
-        for metric in numeric_metrics_for_summary:
-            if metric in group.columns and group[metric].notna().any():
-                row[f'mean_{metric}'] = group[metric].mean()
-                row[f'std_{metric}'] = group[metric].std()
-                row[f'min_{metric}'] = group[metric].min()
-                row[f'max_{metric}'] = group[metric].max()
-            else:
-                for agg_type in ['mean', 'std', 'min', 'max']:
-                    row[f'{agg_type}_{metric}'] = np.nan
-        if 'sinr_5th_percentile' in group.columns and pd.to_numeric(group['sinr_5th_percentile'], errors='coerce').notna().any():
-            row['group_extreme_low_5th_sinr'] = (pd.to_numeric(group['sinr_5th_percentile'], errors='coerce') < LOW_SINR_PERCENTILE_THRESHOLD).any()
-        if 'sinr_95th_percentile' in group.columns and pd.to_numeric(group['sinr_95th_percentile'], errors='coerce').notna().any():
-            row['group_extreme_high_95th_sinr'] = (pd.to_numeric(group['sinr_95th_percentile'], errors='coerce') > HIGH_SINR_PERCENTILE_THRESHOLD).any()
-        row['group_very_low_indiv_sinr'] = False
-        row['group_very_high_indiv_sinr'] = False
-        if 'assigned_sinr_list_str' in group.columns:
-            all_sinrs_group = [s for sinr_list in group['assigned_sinr_list_str'].dropna() if isinstance(sinr_list, list) for s in sinr_list if isinstance(s, (int, float)) and pd.notna(s)]
-            if all_sinrs_group:
-                if np.min(all_sinrs_group) < INDIVIDUAL_EXTREME_LOW_SINR_THRESHOLD:
-                    row['group_very_low_indiv_sinr'] = True
-                if np.max(all_sinrs_group) > INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD:
-                    row['group_very_high_indiv_sinr'] = True
-        if 'handover_count_iter' in group.columns and pd.notna(group['handover_count_iter'].mean()) and group['handover_count_iter'].mean() > HIGH_HO_RATE_THRESHOLD:
-            row['group_had_high_ho_rate'] = True
-        summary_list.append(row)
-    summary_df = pd.DataFrame(summary_list)
-    try:
-        summary_df.to_csv(output_filename, index=False, encoding='utf-8')
-        print(f"Summary CSV saved to: {output_filename}")
-    except Exception as e:
-        print(f"Error saving summary CSV: {e}")
-    return summary_df
+    # Create FacetGrid plot
+    g = sns.catplot(
+        data=df,
+        kind='count',
+        x='algorithm',
+        hue='vuln_category',
+        row='fuzzer_type',
+        col='scenario',
+        palette=COLOR_PALETTE_CATEGORICAL,
+        height=4,
+        aspect=1.4,
+        legend=False
+    )
 
-def print_diagnostic_flags_summary():
-    """Print diagnostic flags summary."""
-    print("\n--- Overall Diagnostic Flags Summary (Analysis Script v5.4) ---")
-    if FLAGS["data_loading_error"]:
-        print("  CRITICAL: Data loading failed. Cannot proceed with analysis.")
-        return
-    if FLAGS["simulation_incomplete"]:
-        print("  WARNING: Simulation iterations might be too low for conclusive results (less than 50 iterations detected).")
-    print("\n  [Extreme Value Flags]")
-    print(f"    Extreme low 5th percentile SINR (<{LOW_SINR_PERCENTILE_THRESHOLD}dB) found: {FLAGS['extreme_low_5th_perc_sinr_found']}")
-    print(f"    Extreme high 95th percentile SINR (>{HIGH_SINR_PERCENTILE_THRESHOLD}dB) found: {FLAGS['extreme_high_95th_perc_sinr_found']}")
-    if FLAGS["extreme_high_95th_perc_sinr_found"]:
-        print("      SUGGESTION: High 95th percentile SINR is good, but review if values are unrealistically high (e.g., > 60dB consistently).")
-    print(f"    Very low individual UE SINR (<{INDIVIDUAL_EXTREME_LOW_SINR_THRESHOLD}dB) found: {FLAGS['very_low_individual_ue_sinr_found']}")
-    if FLAGS["very_low_individual_ue_sinr_found"]:
-        print("      SUGGESTION: Investigate specific UE locations and fuzzer inputs for these cases.")
-    print(f"    Very high individual UE SINR (>{INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD}dB) found: {FLAGS['very_high_individual_ue_sinr_found']}")
-    if FLAGS["very_high_individual_ue_sinr_found"]:
-        print(f"      WARNING: Individual UEs with >{INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD}dB SINR may indicate issues in power/interference calculations.")
-    if FLAGS["rsrp_values_suspiciously_high"]:
-        print(f"      WARNING: RSRP values > {SUSPICIOUS_RSRP_THRESHOLD_DBM}dBm found. Investigate simulation logic.")
-    if FLAGS["rsrp_values_at_floor"]:
-        print("      INFO: Some UEs experienced RSRP at -200 dBm, indicating extremely poor signal.")
-    print("\n  [Vulnerability Pattern Flags]")
-    print(f"    QoS violations are predominant: {FLAGS['predominant_qos_violations']}")
-    print(f"    Few Ping-Pong events in High Mobility: {FLAGS['few_ping_pongs_in_high_mobility']}")
-    if FLAGS["few_ping_pongs_in_high_mobility"]:
-        print("      SUGGESTION: Check if low SINRs prevent HOs or if Ping-Pong oracle window is too large.")
-    print(f"    Significant difference in vulnerabilities between fuzzers: {FLAGS['significant_fuzzer_difference_vuln']}")
-    print(f"    Significant difference in vulnerabilities between algorithms: {FLAGS['significant_ts_algo_difference_vuln']}")
-    print("\n  [Overall Performance Flags]")
-    print(f"    High average handover rate (> {HIGH_HO_RATE_THRESHOLD}/iter): {FLAGS['high_handover_rate_overall']}")
-    print(f"    Very low average fairness index (< {LOW_FAIRNESS_THRESHOLD_OVERALL}): {FLAGS['very_low_fairness_overall']}")
-    print(f"    Suspiciously high 95th percentile SINR values: {FLAGS['suspiciously_high_95th_percentile_sinr_values_present']}")
-    print("\n  --- End of Flags Summary ---")
+    # Axis formatting
+    for ax in g.axes.flatten():
+        ax.set_xlabel("Algorithm", labelpad=8)
+        ax.set_ylabel("Vulnerabilities", labelpad=8)
+        ax.tick_params(axis='x', rotation=30)
 
-def main_analyzer(csv_filepath, output_plot_dir, summary_csv_name):
-    """Main analysis function, orchestrating all tasks."""
-    global SIMULATION_ITERATIONS, FLAGS
-    try:
-        temp_df_for_iter = pd.read_csv(csv_filepath, usecols=['iteration'], nrows=2000)
-        if 'iteration' in temp_df_for_iter.columns and not temp_df_for_iter['iteration'].empty:
-            max_iter = temp_df_for_iter['iteration'].max()
-            if pd.notna(max_iter):
-                SIMULATION_ITERATIONS = int(max_iter) + 1
-    except Exception as e:
-        print(f"Could not infer SIMULATION_ITERATIONS, using default. Error: {e}")
+    # Remove verbose subplot titles
+    g.set_titles(row_template="{row_name}", col_template="{col_name}")
+
+    # Main title
+    g.fig.suptitle("Vulnerability Breakdown by Category", fontsize=18, y=1.03, fontweight='bold')
+
+    # Clean layout
+    g.tight_layout()
+    g.fig.subplots_adjust(top=0.88, hspace=0.35, wspace=0.25)
+
+    # Save output
+    for ext in OUTPUT_FORMATS:
+        g.savefig(os.path.join(output_dir, f"vulnerability_breakdown_chart.{ext}"))
+
+    print(f"Chart saved to: {output_dir}")
+    plt.close('all')
+
+def plot_vulnerability_legend(df, output_dir):
+    """Generates a standalone legend for vulnerability categories."""
+    print("Generating standalone legend for vulnerability categories...")
+
+    # استخراج دسته‌های موجود
+    vuln_df = df.explode('vulnerabilities').dropna(subset=['vulnerabilities'])
+    if vuln_df.empty:
+        print("No vulnerabilities to create legend.")
+        return
+
+    vuln_df['vuln_category'] = vuln_df['vulnerabilities'].apply(lambda x: str(x).split(':')[0])
+    unique_categories = sorted(vuln_df['vuln_category'].unique())
+
+    # ایجاد dummy plot برای ساخت legend
+    fig, ax = plt.subplots(figsize=(6, 1))
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    handles = [
+        plt.Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor=col, markersize=10)
+        for col in sns.color_palette(COLOR_PALETTE_CATEGORICAL, len(unique_categories))
+    ]
+
+    ax.axis('off')  # پنهان‌سازی محورها
+    legend = ax.legend(
+        handles,
+        unique_categories,
+        title="Vulnerability Type",
+        loc='center',
+        ncol=len(unique_categories),
+        frameon=False,
+        fontsize=12,
+        title_fontsize=13
+    )
+
+    for ext in OUTPUT_FORMATS:
+        legend_path = os.path.join(output_dir, f"vulnerability_legend.{ext}")
+        fig.savefig(legend_path, bbox_inches='tight', dpi=300)
+    
+    print(f"Standalone legend saved to: {output_dir}")
+    plt.close(fig)
+
+
+
+
+def plot_performance_tradeoff(df, output_dir):
+    """Creates a scatter plot for performance trade-off across all scenarios."""
+    print("Generating performance trade-off plot...")
+    
+    if not all(k in df.columns for k in ['scenario', 'fuzzer_type', 'fairness_index', 'handover_count_iter', 'sinr_5th_percentile']):
+        print("Skipping trade-off plot due to missing columns.")
+        return
+        
+    tradeoff_df = df[df['fuzzer_type'] == 'AI']
+    if tradeoff_df.empty:
+        print("No data for AI Fuzzer scenario to plot trade-off.")
+        return
+        
+    plt.figure(figsize=(10, 7))
+    # CHANGED: Using more distinct markers and a sequential palette for size
+    markers_list = ['o', 'X', 's', '^', 'D'] # Add more if you have more algorithms
+    
+    scatter = sns.scatterplot(
+        data=tradeoff_df,
+        x='fairness_index',
+        y='handover_count_iter',
+        hue='algorithm',
+        size='sinr_5th_percentile',
+        sizes=(50, 400),
+        style='algorithm',
+        palette=COLOR_PALETTE_CATEGORICAL,
+        markers=markers_list[:len(tradeoff_df['algorithm'].unique())],
+        alpha=0.8,
+    )
+    
+    plt.title('Performance Trade-off Under AI Fuzzer', weight='bold')
+    plt.xlabel("Jain's Fairness Index (Higher is Better)")
+    plt.ylabel("Average Handover Rate (Lower is Better)")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title='Algorithm & SINR (5th %)')
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    
+    for ext in OUTPUT_FORMATS:
+        plot_path = os.path.join(output_dir, f"performance_tradeoff_scatter.{ext}")
+        plt.savefig(plot_path)
+    print(f"Saved performance trade-off plot to {output_dir}")
+    plt.close()
+
+def plot_combined_cdfs(df, output_dir):
+    """Generates a single figure with combined CDFs for key metrics."""
+    print("Generating combined CDF plots...")
+    metrics_to_plot = {
+        'fairness_index': "Fairness Index",
+        'handover_count_iter': "Handover Rate",
+        'sinr_5th_percentile': r'SINR 5th Percentile [dB]'
+    }
+
+    if 'plot_hue' not in df.columns:
+        print("Skipping combined CDF plots, 'plot_hue' column missing.")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
+    fig.suptitle('Cumulative Distribution of Performance Metrics', fontsize=18, weight='bold')
+
+    for i, (metric, title) in enumerate(metrics_to_plot.items()):
+        ax = axes[i]
+        sns.ecdfplot(data=df, x=metric, hue='plot_hue', ax=ax, palette=COLOR_PALETTE_SEQUENTIAL)
+        ax.set_title(f'({chr(97+i)}) {title}', fontsize=14)
+        ax.set_xlabel(title)
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
+
+    axes[0].set_ylabel('Cumulative Probability')
+
+    # 👇 FIX: Place legend inside figure, centered at the bottom
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.subplots_adjust(bottom=0.30)  # enough room for internal legend
+    fig.legend(handles, labels,
+               title='Algorithm (Fuzzer)',
+               loc='lower center',
+               bbox_to_anchor=(0.5, 0.02),
+               ncol=4,
+               frameon=False)
+
+    for ext in OUTPUT_FORMATS:
+        plot_path = os.path.join(output_dir, f"combined_cdfs_chart.{ext}")
+        plt.savefig(plot_path)
+    print(f"Saved combined CDF chart to {output_dir}")
+    plt.close(fig)
+
+
+def main():
+    """Main function to run the complete analysis."""
+    setup_plot_style()
+    
+    # Use a variable for the input file path
+    csv_filepath = 'fuzzing_results_v25_2_single_gpu_fix.csv'
+    
+    output_directory = f"analysis_output_{os.path.splitext(os.path.basename(csv_filepath))[0]}"
+    os.makedirs(output_directory, exist_ok=True)
+    
     df = load_and_preprocess_data(csv_filepath)
     if df is None:
-        FLAGS["data_loading_error"] = True
-        print_diagnostic_flags_summary()
         return
-    os.makedirs(output_plot_dir, exist_ok=True)
-    overall_summary_stats(df)
-    analyze_vulnerabilities(df, output_plot_dir)
-    analyze_key_metrics(df)
-    diagnose_extreme_sinr_values(df, low_sinr_threshold=LOW_SINR_PERCENTILE_THRESHOLD, 
-                                high_sinr_threshold=HIGH_SINR_PERCENTILE_THRESHOLD,
-                                individual_low_thr=INDIVIDUAL_EXTREME_LOW_SINR_THRESHOLD,
-                                individual_high_thr=INDIVIDUAL_EXTREME_HIGH_SINR_THRESHOLD,
-                                num_samples_to_show=3)
-    plot_cdfs(df, output_plot_dir)
-    summary_csv_path = os.path.join(output_plot_dir, summary_csv_name)
-    generate_summary_csv_with_flags(df, summary_csv_path)
-    print_diagnostic_flags_summary()
-    print(f"\nAnalysis complete. Key plots and summary CSV saved to: {output_plot_dir}")
+
+    # --- Generate Plots ---
+    plot_vulnerability_breakdown(df, output_dir=output_directory)
+    plot_performance_tradeoff(df, output_dir=output_directory)
+    plot_combined_cdfs(df, output_dir=output_directory)
+    
+    # --- Perform and Print Statistical Analysis ---
+    print("\n--- Statistical Analysis ---")
+    if 'fuzzer_type' in df.columns and 'vulnerability_count' in df.columns:
+        ai_vulns = df[df['fuzzer_type'] == 'AI']['vulnerability_count']
+        random_vulns = df[df['fuzzer_type'] == 'Random']['vulnerability_count']
+        if not ai_vulns.empty and not random_vulns.empty:
+            t_stat, p_val_fuzzer = ttest_ind(ai_vulns, random_vulns, equal_var=False, nan_policy='omit')
+            print(f"T-test for vulnerability count (AI vs. Random): t-statistic = {t_stat:.4f}, p-value = {p_val_fuzzer:.4g}")
+
+    # --- Generate Summary CSV ---
+    summary_path = os.path.join(output_directory, "performance_summary.csv")
+    summary_cols = ['scenario', 'fuzzer_type', 'algorithm', 'fairness_index', 
+                    'handover_count_iter', 'sinr_5th_percentile', 'vulnerability_count']
+    if all(k in df.columns for k in summary_cols):
+        summary_df = df.groupby(['scenario', 'fuzzer_type', 'algorithm']).agg(
+            avg_fairness=('fairness_index', 'mean'),
+            std_fairness=('fairness_index', 'std'), # NEW: Adding standard deviation
+            avg_ho_rate=('handover_count_iter', 'mean'),
+            std_ho_rate=('handover_count_iter', 'std'), # NEW: Adding standard deviation
+            avg_sinr_5th=('sinr_5th_percentile', 'mean'),
+            total_vulns=('vulnerability_count', 'sum')
+        ).reset_index()
+        summary_df.to_csv(summary_path, index=False)
+        print(f"\nSaved detailed summary (with std dev) to {summary_path}")
+
+    print("\nAnalysis complete.")
+    print(f"All outputs saved in: {output_directory}")
+    plot_vulnerability_legend(df, output_dir=output_directory)
 
 if __name__ == "__main__":
-    target_csv = CSV_FILEPATH 
-    if not os.path.exists(target_csv):
-        csv_from_last_good_run = "fuzzing_results_v20_OFDM_retracing_fix_attempt.csv"
-        if os.path.exists(csv_from_last_good_run) and CSV_FILEPATH != csv_from_last_good_run:
-            print(f"File '{target_csv}' not found, trying '{csv_from_last_good_run}'.")
-            target_csv = csv_from_last_good_run
-        else:
-            print(f"ERROR: CSV file '{CSV_FILEPATH}' not found. Please specify correct CSV_FILEPATH.")
-            target_csv = None
-    if target_csv:
-        analysis_run_plot_dir = f"analysis_output_{os.path.splitext(os.path.basename(target_csv))[0]}_v5_4_run"
-        summary_csv_name = f"diagnostic_summary_{os.path.splitext(os.path.basename(target_csv))[0]}.csv"
-        main_analyzer(target_csv, analysis_run_plot_dir, summary_csv_name)
-    else:
-        print("No CSV file to analyze. Exiting.")
+    main()
