@@ -1,6 +1,6 @@
 # Sionna is the core library for 3GPP channel models
 sionna
-
+tqdm
 # Pandas is used for data analysis and saving results to CSV
 pandas
 
