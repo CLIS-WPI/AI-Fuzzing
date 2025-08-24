@@ -13,7 +13,7 @@ from scipy.stats import ttest_ind
 
 # --- Constants for easy configuration ---
 OUTPUT_FORMATS = ['pdf', 'png']
-COLOR_PALETTE_CATEGORICAL = 'colorblind'
+COLOR_PALETTE_CATEGORICAL = 'tab10'
 COLOR_PALETTE_SEQUENTIAL = 'viridis'
 
 def get_ieee_font():
@@ -54,11 +54,12 @@ def load_and_preprocess_data(csv_filepath):
     print(f"Loading data from {csv_filepath}...")
     df = pd.read_csv(csv_filepath)
     
-    # Parse list-like columns safely
+    # Parse list-like columns safely (optimized for large data)
     for col in ['vulnerabilities']:
         if col in df.columns:
-            df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
-            
+            if isinstance(df[col].iloc[0], str):
+                df[col] = pd.eval(df[col])
+            # If already list, do nothing
     df['vulnerability_count'] = df['vulnerabilities'].apply(len)
     
     if 'algorithm' in df.columns and 'fuzzer_type' in df.columns:
@@ -67,10 +68,16 @@ def load_and_preprocess_data(csv_filepath):
     return df
 
 def plot_vulnerability_breakdown(df, output_dir):
-    # This function is likely still correct as it only depends on the 'vulnerabilities' column.
     print("Generating vulnerability breakdown plot...")
-    # (Assuming the original function code is correct and placed here)
-    pass # Placeholder for brevity
+    vuln_counts = df.explode('vulnerabilities')['vulnerabilities'].value_counts()
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x=vuln_counts.values, y=vuln_counts.index, palette=COLOR_PALETTE_CATEGORICAL)
+    plt.title('Distribution of Vulnerability Types')
+    plt.xlabel('Count')
+    plt.ylabel('Vulnerability Type')
+    for ext in OUTPUT_FORMATS:
+        plt.savefig(os.path.join(output_dir, f'vuln_breakdown.{ext}'))
+    plt.close()
 
 # --- MODIFIED: More impactful performance trade-off plot ---
 def plot_performance_tradeoff_qoe(df, output_dir):
@@ -145,7 +152,11 @@ def plot_qoe_cdfs(df, output_dir):
         ax.set_xlabel(title)
         ax.set_ylabel('Cumulative Probability')
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-        if ax.get_legend() is not None:
+        # Add threshold line for throughput_5th_percentile_mbps
+        if metric == 'throughput_5th_percentile_mbps':
+            ax.axvline(x=1.0, color='r', linestyle='--', label='QoE Threshold (1 Mbps)')
+            ax.legend()
+        if ax.get_legend() is not None and metric != 'throughput_5th_percentile_mbps':
             ax.get_legend().remove()
 
     handles, labels = axes_flat[0].get_legend_handles_labels()
@@ -202,7 +213,50 @@ def plot_fairness_comparison(df, output_dir):
     print(f"Saved fairness comparison barchart to {output_dir}")
     plt.close('all')
 
+# --- NEW PLOT: Comparing Algorithm Performance Across Scenarios ---
+def plot_scenario_comparison(df, output_dir):
+    """Creates a bar plot to compare a key metric for each algorithm across all scenarios."""
+    print("Generating scenario performance comparison plot...")
+    
+    key_metric = 'throughput_5th_percentile_mbps'
+    if key_metric not in df.columns:
+        print(f"Skipping scenario comparison plot, missing key metric: {key_metric}")
+        return
 
+    # We are interested in the performance under the most stressful fuzzer
+    df_ai_fuzzer = df[df['fuzzer_type'] == 'AI'].copy()
+    if df_ai_fuzzer.empty:
+        return
+
+    plt.figure(figsize=(14, 8))
+    g = sns.catplot(
+        data=df_ai_fuzzer,
+        x='scenario',
+        y=key_metric,
+        hue='algorithm',
+        kind='bar',
+        palette=COLOR_PALETTE_CATEGORICAL,
+        height=7,
+        aspect=1.8,
+        legend=False # We will add a custom legend
+    )
+    
+    g.fig.suptitle('Algorithm Robustness Across Scenarios (AI Fuzzer)', y=1.03, weight='bold')
+    g.set_axis_labels("Scenario", "5th Percentile Throughput (Mbps)")
+    g.set_xticklabels(rotation=30, ha='right')
+    
+    # Add a clear legend
+    plt.legend(title='Algorithm', loc='upper right')
+    
+    # Add horizontal line at 1 Mbps as a QoE threshold example
+    plt.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='QoE Threshold (1 Mbps)')
+
+    for ext in OUTPUT_FORMATS:
+        plot_path = os.path.join(output_dir, f"scenario_comparison_barchart.{ext}")
+        g.savefig(plot_path)
+    print(f"Saved scenario comparison barchart to {output_dir}")
+    plt.close('all')
+    
 def main():
     """Main function to run the complete analysis."""
     setup_plot_style()
@@ -220,6 +274,7 @@ def main():
     plot_performance_tradeoff_qoe(df, output_dir=output_directory)
     plot_qoe_cdfs(df, output_dir=output_directory)
     plot_fairness_comparison(df, output_dir=output_directory)
+    plot_scenario_comparison(df, output_dir=output_directory)
 
     # --- Statistical Analysis ---
     print("\n--- Statistical Analysis ---")
@@ -227,11 +282,10 @@ def main():
 
     # --- Generate Summary CSV (MODIFIED) ---
     summary_path = os.path.join(output_directory, "qoe_performance_summary.csv")
-    # CHANGED: Updated columns for summary
     summary_cols = [
         'scenario', 'fuzzer_type', 'algorithm', 
         'jain_fairness_index', 'handover_count_iter', 
-        'throughput_5th_percentile_mbps', 'vulnerability_count'
+        'throughput_5th_percentile_mbps', 'vulnerability_count', 'vulnerabilities'
     ]
     if all(k in df.columns for k in summary_cols):
         summary_df = df.groupby(['scenario', 'fuzzer_type', 'algorithm']).agg(
@@ -241,8 +295,12 @@ def main():
             std_ho_rate=('handover_count_iter', 'std'),
             avg_throughput_5th=('throughput_5th_percentile_mbps', 'mean'),
             std_throughput_5th=('throughput_5th_percentile_mbps', 'std'),
-            total_vulns=('vulnerability_count', 'sum')
+            total_vulns=('vulnerability_count', 'sum'),
+            vulnerabilities=('vulnerabilities', list)
         ).reset_index()
+        # Add vulnerability diversity metric
+        vuln_diversity = lambda x: len(set([item for sublist in x for item in sublist]))
+        summary_df['vuln_diversity'] = df.groupby(['scenario', 'fuzzer_type', 'algorithm'])['vulnerabilities'].agg(vuln_diversity).values
         summary_df.to_csv(summary_path, index=False)
         print(f"\nSaved detailed QoE summary to {summary_path}")
 
