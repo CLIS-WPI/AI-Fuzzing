@@ -1,0 +1,97 @@
+scenario,fuzzer_type,algorithm,avg_jain_fairness,std_jain_fairness,avg_ho_rate,std_ho_rate,avg_throughput_5th,std_throughput_5th,total_vulns,vulnerabilities,vuln_diversity
+Edge Computing,Adaptive_AI,baseline,0.1483328247243362,,0.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -8.74 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.15']]",2
+Edge Computing,Adaptive_AI,ml_based,0.063827887383785,,37.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -7.68 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Edge Computing,Adaptive_AI,utility,0.0436636804759568,,36.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.66 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Edge Computing,Basic_AI,baseline,0.0697494613002866,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.98 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Edge Computing,Basic_AI,ml_based,0.0545209171784551,,36.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -6.41 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+Edge Computing,Basic_AI,utility,0.1209598416042556,,31.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.06 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.12']]",2
+Edge Computing,Naive_Random,baseline,0.1086209699508969,,17.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.37 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.11']]",2
+Edge Computing,Naive_Random,ml_based,0.0754995602128421,,29.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.51 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2
+Edge Computing,Naive_Random,utility,0.2599751197845418,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.12 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.26']]",2
+Edge Computing,Strategic_Random,baseline,0.0697893314061001,,14.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.34 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Edge Computing,Strategic_Random,ml_based,0.0577127318624055,,30.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.62 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Edge Computing,Strategic_Random,utility,0.0705973128391266,,30.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -0.68 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Emergency (BS Outage),Adaptive_AI,baseline,0.0417052331806889,,8.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.87 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Emergency (BS Outage),Adaptive_AI,ml_based,0.041882859856116,,29.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -9.72 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Emergency (BS Outage),Adaptive_AI,utility,0.0922373525064488,,26.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.61 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+Emergency (BS Outage),Basic_AI,baseline,0.0460802051775227,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.27 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+Emergency (BS Outage),Basic_AI,ml_based,0.0738521321360709,,24.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -5.09 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Emergency (BS Outage),Basic_AI,utility,0.0682388912973203,,24.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.65 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Emergency (BS Outage),Naive_Random,baseline,0.0918832788343179,,13.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.66 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+Emergency (BS Outage),Naive_Random,ml_based,0.1651645736993425,,23.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.46 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.17']]",2
+Emergency (BS Outage),Naive_Random,utility,0.0604527159675655,,20.0,,2.5165477752685548,,2,"[['QoS Violation: Avg High Prio SINR = -1.10 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Emergency (BS Outage),Strategic_Random,baseline,0.0598778344048657,,14.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 3.95 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Emergency (BS Outage),Strategic_Random,ml_based,0.0652739863372725,,23.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.95 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Emergency (BS Outage),Strategic_Random,utility,0.1952142666219627,,19.0,,2.345056116580963,,2,"[['QoS Violation: Avg High Prio SINR = -0.69 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.20']]",2
+High Cell Overlap,Adaptive_AI,baseline,0.1587367549010364,,0.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -8.41 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.16']]",2
+High Cell Overlap,Adaptive_AI,ml_based,0.0575926681631875,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -5.31 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+High Cell Overlap,Adaptive_AI,utility,0.1409063163855125,,27.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.25 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.14']]",2
+High Cell Overlap,Basic_AI,baseline,0.1709041317460467,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.57 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.17']]",2
+High Cell Overlap,Basic_AI,ml_based,0.1056263905236206,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -0.77 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.11']]",2
+High Cell Overlap,Basic_AI,utility,0.1622644208483863,,28.0,,1.96387682557106,,2,"[['QoS Violation: Avg High Prio SINR = 2.91 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.16']]",2
+High Cell Overlap,Naive_Random,baseline,0.0728084401100226,,19.0,,2.9768743991851805,,1,[['Unfairness: Jain Index = 0.07']],1
+High Cell Overlap,Naive_Random,ml_based,0.2262824747949835,,22.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.22 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.23']]",2
+High Cell Overlap,Naive_Random,utility,0.1967583527057187,,22.0,,3.3766461491584776,,2,"[['QoS Violation: Avg High Prio SINR = 3.15 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.20']]",2
+High Cell Overlap,Strategic_Random,baseline,0.2805262160634865,,19.0,,2.669330537319184,,2,"[['QoS Violation: Avg High Prio SINR = 2.05 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.28']]",2
+High Cell Overlap,Strategic_Random,ml_based,0.1997699855947835,,26.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.33 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.20']]",2
+High Cell Overlap,Strategic_Random,utility,0.0846196291403872,,23.0,,4.241769623756409,,1,[['Unfairness: Jain Index = 0.08']],1
+High Load,Adaptive_AI,baseline,0.0937290438333383,,14.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.84 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+High Load,Adaptive_AI,ml_based,0.0363520187552533,,24.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -9.30 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+High Load,Adaptive_AI,utility,0.0986324761337678,,27.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.17 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.10']]",2
+High Load,Basic_AI,baseline,0.0664323812607739,,14.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.00 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+High Load,Basic_AI,ml_based,0.0505156973609514,,26.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -7.61 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+High Load,Basic_AI,utility,0.1325484261945096,,25.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.97 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.13']]",2
+High Load,Naive_Random,baseline,0.1003481261336051,,9.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.46 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.10']]",2
+High Load,Naive_Random,ml_based,0.0883295019497228,,25.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -7.09 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+High Load,Naive_Random,utility,0.055780064781352,,20.0,,1.9398169279098512,,2,"[['QoS Violation: Avg High Prio SINR = -0.60 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+High Load,Strategic_Random,baseline,0.0610730445033711,,16.0,,1.8810484409332275,,1,[['Unfairness: Jain Index = 0.06']],1
+High Load,Strategic_Random,ml_based,0.0790196594168275,,25.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.74 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2
+High Load,Strategic_Random,utility,0.0706384886965301,,25.0,,2.1592974781990053,,2,"[['QoS Violation: Avg High Prio SINR = -0.53 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+High Mobility,Adaptive_AI,baseline,0.1232072605529425,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -5.52 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.12']]",2
+High Mobility,Adaptive_AI,ml_based,0.03998107728665,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -9.56 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+High Mobility,Adaptive_AI,utility,0.129102601283338,,30.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.95 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.13']]",2
+High Mobility,Basic_AI,baseline,0.0419755763734886,,13.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.15 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+High Mobility,Basic_AI,ml_based,0.0528944902676389,,27.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -0.88 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+High Mobility,Basic_AI,utility,0.1570068664739769,,25.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.88 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.16']]",2
+High Mobility,Naive_Random,baseline,0.1084093881734348,,14.0,,1.9765271425247195,,1,[['Unfairness: Jain Index = 0.11']],1
+High Mobility,Naive_Random,ml_based,0.0593049050647233,,27.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.09 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+High Mobility,Naive_Random,utility,0.0753517375968653,,22.0,,2.58405499458313,,2,"[['QoS Violation: Avg High Prio SINR = -3.92 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2
+High Mobility,Strategic_Random,baseline,0.1015056135233949,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.93 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.10']]",2
+High Mobility,Strategic_Random,ml_based,0.114158560026726,,25.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.88 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.11']]",2
+High Mobility,Strategic_Random,utility,0.1696998712174224,,19.0,,3.487625527381897,,2,"[['QoS Violation: Avg High Prio SINR = -1.21 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.17']]",2
+Interference-Heavy,Adaptive_AI,baseline,0.0748775327471699,,18.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.45 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Interference-Heavy,Adaptive_AI,ml_based,0.0602813784152602,,54.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.90 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Interference-Heavy,Adaptive_AI,utility,0.0313183417444011,,60.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.24 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.03']]",2
+Interference-Heavy,Basic_AI,baseline,0.0314718330819646,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.62 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.03']]",2
+Interference-Heavy,Basic_AI,ml_based,0.0263873716832271,,47.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.22 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.03']]",2
+Interference-Heavy,Basic_AI,utility,0.0605447658035867,,48.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.31 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Interference-Heavy,Naive_Random,baseline,0.0767064970247939,,20.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.67 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2
+Interference-Heavy,Naive_Random,ml_based,0.0708406908040371,,44.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.21 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Interference-Heavy,Naive_Random,utility,0.0582252307361118,,44.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.81 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Interference-Heavy,Strategic_Random,baseline,0.0483288626450143,,20.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.75 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+Interference-Heavy,Strategic_Random,ml_based,0.06451664022377,,42.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -0.95 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Interference-Heavy,Strategic_Random,utility,0.061773361388256,,42.0,,2.400579237937927,,2,"[['QoS Violation: Avg High Prio SINR = 1.79 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.06']]",2
+Low Load,Adaptive_AI,baseline,0.0464385439866484,,11.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.24 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+Low Load,Adaptive_AI,ml_based,0.0400956773567109,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -9.89 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Low Load,Adaptive_AI,utility,0.1681086888753111,,22.0,,2.867838227748871,,2,"[['QoS Violation: Avg High Prio SINR = 3.02 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.17']]",2
+Low Load,Basic_AI,baseline,0.0544152038776475,,12.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 1.54 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.05']]",2
+Low Load,Basic_AI,ml_based,0.0689978738638649,,26.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.92 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Low Load,Basic_AI,utility,0.0921057592874732,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -3.46 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+Low Load,Naive_Random,baseline,0.2371030721886829,,15.0,,1.8810484409332275,,1,[['Unfairness: Jain Index = 0.24']],1
+Low Load,Naive_Random,ml_based,0.1114388668088132,,22.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -5.61 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.11']]",2
+Low Load,Naive_Random,utility,0.0732123644427866,,23.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.45 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.07']]",2
+Low Load,Strategic_Random,baseline,0.2898901531067827,,10.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -2.93 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.29']]",2
+Low Load,Strategic_Random,ml_based,0.1030117587124529,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.42 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.10']]",2
+Low Load,Strategic_Random,utility,0.1330812512940825,,21.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = 0.23 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.13']]",2
+Mixed Mobility,Adaptive_AI,baseline,0.0400449972679749,,3.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -7.57 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Mixed Mobility,Adaptive_AI,ml_based,0.0361373278955222,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -6.87 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Mixed Mobility,Adaptive_AI,utility,0.0398707387426955,,27.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -5.70 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Mixed Mobility,Basic_AI,baseline,0.0830438072210519,,10.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -4.52 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2
+Mixed Mobility,Basic_AI,ml_based,0.119223071963027,,28.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -7.49 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.12']]",2
+Mixed Mobility,Basic_AI,utility,0.1394486750222364,,23.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.62 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.14']]",2
+Mixed Mobility,Naive_Random,baseline,0.1294358899583899,,11.0,,2.059684205055237,,1,[['Unfairness: Jain Index = 0.13']],1
+Mixed Mobility,Naive_Random,ml_based,0.0407812085493204,,19.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.76 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.04']]",2
+Mixed Mobility,Naive_Random,utility,0.085131239764928,,23.0,,2.333670330047608,,2,"[['QoS Violation: Avg High Prio SINR = 2.58 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.09']]",2
+Mixed Mobility,Strategic_Random,baseline,0.1089393466151281,,11.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -1.08 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.11']]",2
+Mixed Mobility,Strategic_Random,ml_based,0.1463463345726179,,23.0,,1.8810484409332275,,2,"[['QoS Violation: Avg High Prio SINR = -0.06 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.15']]",2
+Mixed Mobility,Strategic_Random,utility,0.0805707679916686,,20.0,,2.1423198103904726,,2,"[['QoS Violation: Avg High Prio SINR = -2.49 dB (Threshold: 5.0 dB)', 'Unfairness: Jain Index = 0.08']]",2

@@ -54,25 +54,40 @@ def load_and_preprocess_data(csv_filepath):
     print(f"Loading data from {csv_filepath}...")
     df = pd.read_csv(csv_filepath)
     
-    # Parse list-like columns safely (optimized for large data)
+    # Parse list-like columns safely
     for col in ['vulnerabilities']:
         if col in df.columns:
             if isinstance(df[col].iloc[0], str):
-                df[col] = pd.eval(df[col])
-            # If already list, do nothing
-    df['vulnerability_count'] = df['vulnerabilities'].apply(len)
-    
+                try:
+                    df[col] = pd.eval(df[col])
+                except Exception as e:
+                    print(f"Error parsing column {col}: {e}")
+                    df[col] = df[col].apply(lambda x: [] if pd.isna(x) else x)
+            df['vulnerability_count'] = df['vulnerabilities'].apply(len)
+
+    # Check for NaN or invalid values
+    for col in ['jain_fairness_index', 'handover_count_iter', 'throughput_5th_percentile_mbps', 'avg_transmission_time_ms']:
+        if col in df.columns:
+            invalid_count = df[col].isna().sum() + (df[col] == float('inf')).sum() + (df[col] == -float('inf')).sum()
+            if invalid_count > 0:
+                print(f"Warning: Found {invalid_count} invalid values in {col}. Replacing with 0.")
+                df[col] = df[col].replace([float('inf'), -float('inf')], 0).fillna(0)
+
     if 'algorithm' in df.columns and 'fuzzer_type' in df.columns:
         df['plot_hue'] = df['algorithm'] + ' (' + df['fuzzer_type'] + ')'
-        
+
+    print(f"Loaded {len(df)} rows with columns: {df.columns.tolist()}")
     return df
 
 def plot_vulnerability_breakdown(df, output_dir):
     print("Generating vulnerability breakdown plot...")
     vuln_counts = df.explode('vulnerabilities')['vulnerabilities'].value_counts()
+    if vuln_counts.empty:
+        print("No vulnerabilities found for plotting. Skipping...")
+        return
     plt.figure(figsize=(10, 6))
     sns.barplot(x=vuln_counts.values, y=vuln_counts.index, palette=COLOR_PALETTE_CATEGORICAL)
-    plt.title('Distribution of Vulnerability Types')
+    plt.title('Distribution of Vulnerability Types', weight='bold')
     plt.xlabel('Count')
     plt.ylabel('Vulnerability Type')
     for ext in OUTPUT_FORMATS:
@@ -89,39 +104,35 @@ def plot_performance_tradeoff_qoe(df, output_dir):
     if not all(k in df.columns for k in required_cols):
         print("Skipping QoE trade-off plot due to missing columns.")
         return
-        
     tradeoff_df = df[df['fuzzer_type'] == 'AI'].copy()
     if tradeoff_df.empty:
         print("No data for AI Fuzzer to plot QoE trade-off.")
         return
-        
+    tradeoff_df = tradeoff_df[tradeoff_df['throughput_5th_percentile_mbps'] > 0]  # Filter invalid data
+    if tradeoff_df.empty:
+        print("No valid data after filtering for QoE trade-off plot.")
+        return
     plt.figure(figsize=(10, 7))
     markers_list = ['o', 'X', 's', '^', 'D']
-    
-    scatter = sns.scatterplot(
+    sns.scatterplot(
         data=tradeoff_df,
-        x='jain_fairness_index', # CHANGED
+        x='jain_fairness_index',
         y='handover_count_iter',
         hue='algorithm',
-        size='throughput_5th_percentile_mbps', # CHANGED: This is the key improvement
+        size='throughput_5th_percentile_mbps',
         sizes=(50, 400),
         style='algorithm',
         palette=COLOR_PALETTE_CATEGORICAL,
         markers=markers_list[:len(tradeoff_df['algorithm'].unique())],
         alpha=0.8,
     )
-    
     plt.title('QoE Trade-off: Fairness vs. Handovers vs. Worst-User Throughput', weight='bold')
     plt.xlabel("Jain's Fairness Index (Higher is Better)")
     plt.ylabel("Handover Rate (Lower is Better)")
-    # CHANGED: Updated legend title
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title='Algorithm & 5th Percentile\nThroughput (Mbps)')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title='Algorithm & Throughput (Mbps)')
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    
     for ext in OUTPUT_FORMATS:
-        plot_path = os.path.join(output_dir, f"qoe_tradeoff_scatter.{ext}")
-        plt.savefig(plot_path)
-    print(f"Saved QoE performance trade-off plot to {output_dir}")
+        plt.savefig(os.path.join(output_dir, f'qoe_tradeoff_scatter.{ext}'))
     plt.close()
 
 # --- MODIFIED: More comprehensive CDF plot ---
@@ -141,37 +152,32 @@ def plot_qoe_cdfs(df, output_dir):
         print("Skipping combined QoE CDF plots, required columns missing.")
         return
 
+    df_filtered = df.copy()
+    for metric in metrics_to_plot.keys():
+        df_filtered = df_filtered[df_filtered[metric].notna() & (df_filtered[metric] != float('inf')) & (df_filtered[metric] != -float('inf'))]
+    if df_filtered.empty:
+        print("No valid data for CDF plots after filtering.")
+        return
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     fig.suptitle('Cumulative Distribution of Key Performance and QoE Metrics', fontsize=18, weight='bold')
     axes_flat = axes.flatten()
-
     for i, (metric, title) in enumerate(metrics_to_plot.items()):
         ax = axes_flat[i]
-        sns.ecdfplot(data=df, x=metric, hue='plot_hue', ax=ax, palette=COLOR_PALETTE_CATEGORICAL)
+        sns.ecdfplot(data=df_filtered, x=metric, hue='plot_hue', ax=ax, palette=COLOR_PALETTE_CATEGORICAL)
         ax.set_title(f'({chr(97+i)}) CDF of {title}', fontsize=14)
         ax.set_xlabel(title)
         ax.set_ylabel('Cumulative Probability')
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-        # Add threshold line for throughput_5th_percentile_mbps
         if metric == 'throughput_5th_percentile_mbps':
             ax.axvline(x=1.0, color='r', linestyle='--', label='QoE Threshold (1 Mbps)')
             ax.legend()
         if ax.get_legend() is not None and metric != 'throughput_5th_percentile_mbps':
             ax.get_legend().remove()
-
     handles, labels = axes_flat[0].get_legend_handles_labels()
     fig.tight_layout(rect=[0, 0.1, 1, 0.95])
-    fig.legend(handles, labels,
-               title='Algorithm (Fuzzer)',
-               loc='lower center',
-               bbox_to_anchor=(0.5, 0),
-               ncol=4,
-               frameon=False)
-
+    fig.legend(handles, labels, title='Algorithm (Fuzzer)', loc='lower center', bbox_to_anchor=(0.5, 0), ncol=4, frameon=False)
     for ext in OUTPUT_FORMATS:
-        plot_path = os.path.join(output_dir, f"qoe_cdfs_chart.{ext}")
-        plt.savefig(plot_path)
-    print(f"Saved QoE CDFs chart to {output_dir}")
+        plt.savefig(os.path.join(output_dir, f'qoe_cdfs_chart.{ext}'))
     plt.close(fig)
 
 # --- NEW PLOT: Comparing different fairness metrics ---
@@ -184,12 +190,12 @@ def plot_fairness_comparison(df, output_dir):
         print("Skipping fairness comparison plot due to missing columns.")
         return
 
-    # Normalize alpha-fairness scores for better comparison on the same scale if needed
-    # For now, we plot them as is, assuming their relative values are important.
-    
-    df_melted = df.melt(id_vars=['algorithm', 'scenario'], value_vars=fairness_metrics, 
-                        var_name='Fairness Metric', value_name='Score')
-
+    df_filtered = df[fairness_metrics + ['algorithm', 'scenario']].dropna()
+    if df_filtered.empty:
+        print("No valid data for fairness comparison plot.")
+        return
+    df_melted = df_filtered.melt(id_vars=['algorithm', 'scenario'], value_vars=fairness_metrics, 
+                                 var_name='Fairness Metric', value_name='Score')
     plt.figure(figsize=(14, 8))
     g = sns.catplot(
         data=df_melted,
@@ -202,14 +208,11 @@ def plot_fairness_comparison(df, output_dir):
         height=6,
         aspect=1.2
     )
-    
     g.fig.suptitle('Comparison of Fairness Metrics Across Algorithms and Scenarios', y=1.03, weight='bold')
     g.set_xticklabels(rotation=30, ha='right')
     g.set_axis_labels("Fairness Metric Type", "Average Score")
-    
     for ext in OUTPUT_FORMATS:
-        plot_path = os.path.join(output_dir, f"fairness_comparison_barchart.{ext}")
-        g.savefig(plot_path)
+        plt.savefig(os.path.join(output_dir, f'fairness_comparison_barchart.{ext}'))
     print(f"Saved fairness comparison barchart to {output_dir}")
     plt.close('all')
 
@@ -225,9 +228,10 @@ def plot_scenario_comparison(df, output_dir):
 
     # We are interested in the performance under the most stressful fuzzer
     df_ai_fuzzer = df[df['fuzzer_type'] == 'AI'].copy()
+    df_ai_fuzzer = df_ai_fuzzer[df_ai_fuzzer[key_metric].notna() & (df_ai_fuzzer[key_metric] > 0)]
     if df_ai_fuzzer.empty:
+        print("No valid data for scenario comparison plot.")
         return
-
     plt.figure(figsize=(14, 8))
     g = sns.catplot(
         data=df_ai_fuzzer,
@@ -238,30 +242,23 @@ def plot_scenario_comparison(df, output_dir):
         palette=COLOR_PALETTE_CATEGORICAL,
         height=7,
         aspect=1.8,
-        legend=False # We will add a custom legend
+        legend=False
     )
-    
     g.fig.suptitle('Algorithm Robustness Across Scenarios (AI Fuzzer)', y=1.03, weight='bold')
     g.set_axis_labels("Scenario", "5th Percentile Throughput (Mbps)")
     g.set_xticklabels(rotation=30, ha='right')
-    
-    # Add a clear legend
     plt.legend(title='Algorithm', loc='upper right')
-    
-    # Add horizontal line at 1 Mbps as a QoE threshold example
     plt.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='QoE Threshold (1 Mbps)')
-
     for ext in OUTPUT_FORMATS:
-        plot_path = os.path.join(output_dir, f"scenario_comparison_barchart.{ext}")
-        g.savefig(plot_path)
-    print(f"Saved scenario comparison barchart to {output_dir}")
+        plt.savefig(os.path.join(output_dir, f'scenario_comparison_barchart.{ext}'))
     plt.close('all')
     
 def main():
     """Main function to run the complete analysis."""
     setup_plot_style()
     
-    csv_filepath = 'fuzzing_results_v25_2_single_gpu_fix.csv'
+    # Use only the correct CSV file name
+    csv_filepath = 'fuzzing_results_v25_4_runtime_opt.csv'
     output_directory = f"analysis_output_{os.path.splitext(os.path.basename(csv_filepath))[0]}"
     os.makedirs(output_directory, exist_ok=True)
     
@@ -269,12 +266,13 @@ def main():
     if df is None:
         return
 
-    # --- Generate Plots ---
-    plot_vulnerability_breakdown(df.copy(), output_dir=output_directory) # Use copy to avoid modification issues
-    plot_performance_tradeoff_qoe(df, output_dir=output_directory)
-    plot_qoe_cdfs(df, output_dir=output_directory)
-    plot_fairness_comparison(df, output_dir=output_directory)
-    plot_scenario_comparison(df, output_dir=output_directory)
+    # Generate Plots
+    # plot_network_topology(output_dir=output_directory)  # Uncomment if you have this function
+    plot_vulnerability_breakdown(df.copy(), output_dir=output_directory)
+    plot_performance_tradeoff_qoe(df.copy(), output_dir=output_directory)
+    plot_qoe_cdfs(df.copy(), output_dir=output_directory)
+    plot_fairness_comparison(df.copy(), output_dir=output_directory)
+    plot_scenario_comparison(df.copy(), output_dir=output_directory)
 
     # --- Statistical Analysis ---
     print("\n--- Statistical Analysis ---")

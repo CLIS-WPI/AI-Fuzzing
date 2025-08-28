@@ -22,27 +22,6 @@ from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
 from sionna.phy.ofdm import ResourceGrid
 from sionna.phy.channel import GenerateOFDMChannel
 
-# For faster data loading with DALI (if you have the NGC container, import it)
-
-try:
-    from nvidia.dali.plugin.tf import DALIDataset
-    DALI_AVAILABLE = True
-except ImportError:
-    DALI_AVAILABLE = False
-    print("DALI not available - falling back to tf.data for data loading.")
-
-def get_optimized_dataset(dataset, batch_size):
-    """
-    Returns a dataset using DALI if available, otherwise tf.data with optimal settings.
-    """
-    if DALI_AVAILABLE:
-        # Example: return DALIDataset(...)
-        # You must fill in the DALI pipeline as needed for your use case
-        return DALIDataset(...)
-    else:
-        return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-
 # --- Global Constants ---
 NUM_CELLS = 19
 NUM_UES = 30
@@ -51,7 +30,7 @@ CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
-SIMULATION_ITERATIONS = 50  # Kept at 200, but if it takes too long, reduce to 100
+SIMULATION_ITERATIONS = 1  # Kept at 200, but if it takes too long, reduce to 100
 FUZZER_GENERATIONS = 50  # FIXED: Increased for better AI convergence
 FUZZER_POPULATION = 5
 
@@ -94,7 +73,7 @@ def calculate_throughput_tf(sinr_linear_arr, bandwidth_hz):
 class NetworkEnvironment:
     # CHANGED: Added 'inter_site_distance' as a parameter to the constructor
     def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
-        self.batch_size = 1024  # Increased to 256 for H100 - if OOM occurs, revert to 128
+        self.batch_size = 256  # Increased to 256 for H100 - if OOM occurs, revert to 128
         self.num_ues = num_ues
         
         if active_cell_indices is None:
@@ -388,8 +367,8 @@ class NetworkEnvironment:
             rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
             sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
 
-            # FIXED: Additional clip to prevent near-zero throughputs
-            sinr_db_tf = tf.clip_by_value(sinr_db_tf, -10.0, 30.0)  # Reasonable range for 5G
+            # PATCH: Lower SINR clipping to -25dB for more realistic edge-user modeling
+            sinr_db_tf = tf.clip_by_value(sinr_db_tf, -25.0, 30.0)  # Allow lower SINR for edge users
 
             return rsrp_db_tf, sinr_db_tf
             
@@ -421,8 +400,8 @@ class NetworkEnvironment:
             rsrp_db_tf = tf.where(tf.math.is_finite(rsrp_db_tf), rsrp_db_tf, -200.0 * tf.ones_like(rsrp_db_tf))
             sinr_db_tf = tf.where(tf.math.is_finite(sinr_db_tf), sinr_db_tf, -30.0 * tf.ones_like(sinr_db_tf))
 
-            # FIXED: Additional clip in fallback
-            sinr_db_tf = tf.clip_by_value(sinr_db_tf, -10.0, 30.0)
+            # PATCH: Lower SINR clipping to -25dB in fallback
+            sinr_db_tf = tf.clip_by_value(sinr_db_tf, -25.0, 30.0)
 
             return rsrp_db_tf, sinr_db_tf
 
@@ -603,47 +582,44 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
         return state
     
     def _calculate_reward(self, ue_idx, new_sinr, old_sinr, handover_occurred, priority, cell_loads):
-        """FIXED: Enhanced reward function with normalization and floor to prevent near-zero throughputs"""
-        # Normalize SINR to [0,1] for better scaling
-        new_sinr_norm = (new_sinr + 30) / 60.0  # Assuming -30 to 30 dB range
-        old_sinr_norm = (old_sinr + 30) / 60.0
-        
-        # 1. Throughput-based reward (primary objective) - use normalized
-        new_throughput = np.log2(1 + max(0, 10**(new_sinr_norm * 60 - 30) / 10.0))  # Denormalize for calc
-        old_throughput = np.log2(1 + max(0, 10**(old_sinr_norm * 60 - 30) / 10.0))
-        throughput_reward = (new_throughput - old_throughput) * 10  # Scale up
-        
-        # 2. SINR improvement reward - normalized
-        sinr_improvement = max(0, new_sinr_norm - old_sinr_norm) * 30  # Scale to dB equivalent
-        sinr_reward = sinr_improvement * 0.5
-        
-        # 3. Handover penalty with smart logic
+        """PATCH: Improved reward function for stronger learning signal and better vulnerability discovery"""
+        # Convert SINR dB to linear for throughput calculation
+        new_sinr_linear = 10 ** (new_sinr / 10.0)
+        old_sinr_linear = 10 ** (old_sinr / 10.0)
+        # Throughput in bps (normalized by 1 MHz for scale invariance)
+        new_throughput = np.log2(1 + max(0, new_sinr_linear))
+        old_throughput = np.log2(1 + max(0, old_sinr_linear))
+        throughput_reward = (new_throughput - old_throughput) * 15  # Stronger scaling
+
+        # SINR improvement reward (direct, not normalized)
+        sinr_improvement = max(0, new_sinr - old_sinr)
+        sinr_reward = sinr_improvement * 0.7
+
+        # Handover penalty: strong penalty for unnecessary handover, mild for beneficial
         current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None else 0
         handover_penalty = 0
         if handover_occurred:
-            # Penalize unnecessary handovers, but reward beneficial ones
-            if new_sinr > old_sinr + 3:  # Beneficial handover (3dB improvement)
-                handover_penalty = -0.5  # Small penalty for beneficial handover
+            if new_sinr > old_sinr + 3:
+                handover_penalty = -1.0  # Mild penalty for beneficial handover
             else:
-                handover_penalty = -3.0   # Larger penalty for poor handover
-        
-        # 4. Load balancing reward
+                handover_penalty = -5.0  # Strong penalty for unnecessary handover
+
+        # Load balancing reward
         if len(cell_loads) > 0:
             current_load = cell_loads[current_cell] if 0 <= current_cell < len(cell_loads) else 0.5
-            load_reward = -2.0 * current_load  # Reward for using less loaded cells
+            load_reward = -3.0 * current_load
         else:
             load_reward = 0
-        
-        # 5. Priority scaling (high priority users get more weight)
-        priority_scale = 2.0 if priority == 1 else (1.5 if priority == 2 else 1.0)
-        
-        # 6. QoS violation penalty
-        qos_penalty = -5.0 if new_sinr < 0 else 0  # Strong penalty for poor coverage
-        
-        # FIXED: Add reward floor to prevent near-zero
-        total_reward = priority_scale * (throughput_reward + sinr_reward + load_reward) + handover_penalty + qos_penalty
-        total_reward = max(total_reward, -1.0)  # Floor to avoid extreme negatives
 
+        # Priority scaling
+        priority_scale = 2.0 if priority == 1 else (1.5 if priority == 2 else 1.0)
+
+        # QoS violation penalty: much stronger
+        qos_penalty = -10.0 if new_sinr < 0 else 0
+
+        # Total reward
+        total_reward = priority_scale * (throughput_reward + sinr_reward + load_reward) + handover_penalty + qos_penalty
+        total_reward = max(total_reward, -3.0)  # Allow more negative reward for bad actions
         return total_reward
         
     def _add_experience(self, ue_idx, state, action, reward, next_state, done=False):
@@ -1407,6 +1383,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
                 if gen > early_stop_window:
                     recent_sum = [np.sum(obj) for obj in recent_objectives[-early_stop_window:]]
                     if np.mean(recent_sum) < early_stop_threshold:
+
                         print(f"Early stopping at generation {gen} due to no improvement in objectives (mean sum: {np.mean(recent_sum):.4f})")
                         pbar_gen.close()
                         # Final vulnerability report
@@ -1714,7 +1691,7 @@ class Oracle:
 
         if assigned_sinr_np.size > 0:
             assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
-            jain_score = self._jain_fairness(assigned_sinr_linear)
+            jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
             results['jain_index'] = jain_score
             if jain_score < self.fairness_threshold:
                 results['vulnerabilities'].append(f"Unfairness: Jain Index = {jain_score:.2f}")
@@ -1770,7 +1747,7 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
     }
     
     total_combinations = len(fuzzer_map) * len(algorithm_factories)
-    combination_pbar = tqdm(total=total_combinations, desc=f"Processing {scenario_name}", leave=False)
+    combination_pbar = tqdm(total=total_combinations, desc="Overall Progress", leave=False)
     combo_times = []
     
     # Enhanced metrics tracking
@@ -1810,7 +1787,7 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
                 fuzzer = FuzzerClass(shared_env_state, ts_instance)
             
             rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
-            _ = ts_instance.assign_ues(rsrp_init, sinr_init, shared_env_state.cell_loads, prio_init, dt=0)
+            _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
 
             if ts_instance.prev_assignments is None: 
                 print(f"CRITICAL ERROR: Initial assignment failed for {actual_algo_name}. Skipping.")
@@ -2170,7 +2147,7 @@ def plot_results(df, output_plot_dir="plots_default"):
     plot_pbar.close()
     print(f"All plots saved to {output_plot_dir}")
 
-def advanced_statistical_analysis(df):
+def advanced_statistical_analysis(df, fuzzer_effectiveness_by_scenario):
     """تحلیل آماری پیشرفته برای paper"""
     print("\n" + "="*50 + " ADVANCED ANALYSIS " + "="*50)
     
