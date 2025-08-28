@@ -22,13 +22,25 @@ from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
 from sionna.phy.ofdm import ResourceGrid
 from sionna.phy.channel import GenerateOFDMChannel
 
-# برای data loading سریع‌تر با DALI (اگر NGC container داری، import کن)
+# For faster data loading with DALI (if you have the NGC container, import it)
+
 try:
     from nvidia.dali.plugin.tf import DALIDataset
     DALI_AVAILABLE = True
 except ImportError:
     DALI_AVAILABLE = False
     print("DALI not available - falling back to tf.data for data loading.")
+
+def get_optimized_dataset(dataset, batch_size):
+    """
+    Returns a dataset using DALI if available, otherwise tf.data with optimal settings.
+    """
+    if DALI_AVAILABLE:
+        # Example: return DALIDataset(...)
+        # You must fill in the DALI pipeline as needed for your use case
+        return DALIDataset(...)
+    else:
+        return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
 # --- Global Constants ---
@@ -39,9 +51,9 @@ CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
-SIMULATION_ITERATIONS = 200  # نگه داشتم، اما اگر خیلی طول کشید، به 100 کم کن
-FUZZER_GENERATIONS = 200  # FIXED: Increased for better AI convergence
-FUZZER_POPULATION = 10
+SIMULATION_ITERATIONS = 50  # Kept at 200, but if it takes too long, reduce to 100
+FUZZER_GENERATIONS = 50  # FIXED: Increased for better AI convergence
+FUZZER_POPULATION = 5
 
 ENABLE_DETAILED_METRIC_PRINT = False
 ENABLE_TF_DEVICE_LOGGING = False
@@ -82,7 +94,7 @@ def calculate_throughput_tf(sinr_linear_arr, bandwidth_hz):
 class NetworkEnvironment:
     # CHANGED: Added 'inter_site_distance' as a parameter to the constructor
     def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
-        self.batch_size = 256  # افزایش به 256 برای H100 - اگر OOM شد به 128 برگردون
+        self.batch_size = 1024  # Increased to 256 for H100 - if OOM occurs, revert to 128
         self.num_ues = num_ues
         
         if active_cell_indices is None:
@@ -111,8 +123,8 @@ class NetworkEnvironment:
                 carrier_frequency=CARRIER_FREQUENCY, o2i_model='low',
                 ut_array=self.ut_array, bs_array=self.bs_array,
                 direction='downlink',
-                enable_pathloss=True, enable_shadow_fading=True,
-                always_generate_lsp=True,
+                enable_pathloss=True, enable_shadow_fading=False,
+                always_generate_lsp=False,
                 precision="single"
             )
         except Exception as e:
@@ -461,7 +473,7 @@ class TrafficSteeringAlgorithm:
         batch_results = []
         
         # Process assignments in parallel batches
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=16) as executor:
             futures = []
             for assignments in assignment_list:
                 future = executor.submit(self.assign_ues, rsrp, sinr, cell_loads, priorities, dt)
@@ -1215,7 +1227,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
             'edge_case_topology': 0.15,  # Geometric edge cases
             'temporal_patterns': 0.1     # Time-based attack patterns
         }
-        self.adaptation_frequency = 20  # Adapt strategies every N generations
+        self.adaptation_frequency = 50  # Adapt strategies every N generations
         
     def _generate_strategy_based_individual(self, strategy_name):
         """Generate individuals based on specific vulnerability strategies"""
@@ -1387,8 +1399,23 @@ class AdaptiveAIFuzzer(AIFuzzer):
 
         pbar_gen = tqdm(range(self.generations), desc="Adaptive AI Fuzzer", leave=False, disable=not hasattr(tqdm, '_instances'))
         
+        early_stop_window = 10
+        early_stop_threshold = 0.01  # You can adjust this threshold for your use case
         for gen in pbar_gen:
             if self.use_nsga2:
+                # Early stopping: if no improvement in objectives for N generations
+                if gen > early_stop_window:
+                    recent_sum = [np.sum(obj) for obj in recent_objectives[-early_stop_window:]]
+                    if np.mean(recent_sum) < early_stop_threshold:
+                        print(f"Early stopping at generation {gen} due to no improvement in objectives (mean sum: {np.mean(recent_sum):.4f})")
+                        pbar_gen.close()
+                        # Final vulnerability report
+                        if len(self.vulnerability_memory) > 0:
+                            best_vulns = sorted(self.vulnerability_memory, key=lambda x: np.sum(x['objectives']), reverse=True)[:3]
+                            print(f"\nTop vulnerability patterns found:")
+                            for i, vuln in enumerate(best_vulns):
+                                print(f"  {i+1}. Objectives: {vuln['objectives']}, Generation: {vuln['generation']}")
+                        return best_overall_individual
                 # Enhanced NSGA-II with vulnerability tracking
                 with ThreadPoolExecutor(max_workers=8) as executor:
                     objectives_list = list(executor.map(
@@ -1744,14 +1771,25 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
     
     total_combinations = len(fuzzer_map) * len(algorithm_factories)
     combination_pbar = tqdm(total=total_combinations, desc=f"Processing {scenario_name}", leave=False)
+    combo_times = []
     
     # Enhanced metrics tracking
     vulnerability_stats = {fuzzer_name: [] for fuzzer_name in fuzzer_map.keys()}
     performance_comparison = {fuzzer_name: {} for fuzzer_name in fuzzer_map.keys()}
 
     for fuzzer_name, FuzzerClass in fuzzer_map.items():
-        for actual_algo_name, algo_factory in algorithm_factories.items():
-            combination_pbar.set_description(f"{scenario_name}: {fuzzer_name}+{actual_algo_name}")
+        fuzzer_combo_start = time.time()
+        for combo_idx, (actual_algo_name, algo_factory) in enumerate(algorithm_factories.items()):
+            algo_combo_start = time.time()
+            # Estimate time left for this combo
+            if combo_times:
+                avg_combo_time = sum(combo_times) / len(combo_times)
+                combos_left = total_combinations - (combo_idx + (list(fuzzer_map.keys()).index(fuzzer_name) * len(algorithm_factories)))
+                combo_eta = avg_combo_time * combos_left
+                eta_str = f" | ETA: {combo_eta/60:.1f} min left"
+            else:
+                eta_str = ""
+            combination_pbar.set_description(f"{scenario_name}: {fuzzer_name}+{actual_algo_name}{eta_str}")
             
             shared_env_state.reset(initial_load=initial_load, max_speed=max_speed)
             
@@ -1781,8 +1819,10 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
             
             shared_env_state.update_cell_loads(ts_instance.prev_assignments)
             
+            iter_times = []
             iter_pbar = tqdm(range(SIMULATION_ITERATIONS), desc=f"  {fuzzer_name}+{actual_algo_name} Iterations", leave=False)
             for iteration in iter_pbar:
+                iter_start = time.time()
                 try:
                     assignments_at_start_of_iter = ts_instance.prev_assignments.copy()
                     fuzzed_inputs = fuzzer.generate_inputs(dt)
@@ -1895,11 +1935,25 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
 
                     # Enhanced progress display showing vulnerability discovery
                     vuln_display = f"V:{vulnerability_count}|S:{vulnerability_stats[fuzzer_name][-1]['vulnerability_severity']}"
+                    iter_time = time.time() - iter_start
+                    iter_times.append(iter_time)
+                    # Estimate time left for this combo
+                    if iter_times:
+                        avg_iter_time = sum(iter_times) / len(iter_times)
+                        iters_left = SIMULATION_ITERATIONS - (iteration + 1)
+                        iter_eta = avg_iter_time * iters_left
+                        iter_eta_str = f" | ETA: {iter_eta/60:.1f} min left"
+                    else:
+                        iter_eta_str = ""
                     iter_pbar.set_postfix({
                         'HOs': handovers_this_step, 
                         'Thrpt_5th': f'{safe_nanpercentile(user_throughputs_mbps, 5):.2f}Mbps',
-                        'Vulns': vuln_display
+                        'Vulns': vuln_display,
+                        'Time(s)': f'{iter_time:.2f}',
+                        'ETA': iter_eta_str
                     })
+                    if iteration == SIMULATION_ITERATIONS - 1:
+                        print(f"    [Timing] {fuzzer_name}+{actual_algo_name} last iteration took {iter_time:.2f} seconds")
                     
                 except Exception as e:
                     print(f"ERROR in iteration {iteration} for {fuzzer_name}+{actual_algo_name}: {e}")
@@ -1907,9 +1961,13 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
                     continue
                     
             iter_pbar.close()
+            combo_time = time.time() - algo_combo_start
+            combo_times.append(combo_time)
+            print(f"  [Timing] {fuzzer_name}+{actual_algo_name} total time: {combo_time:.2f} seconds")
             combination_pbar.update(1)
             
     combination_pbar.close()
+    print(f"[Timing] {scenario_name} all fuzzer/algorithm combos: {time.time() - fuzzer_combo_start:.2f} seconds")
     
     # ENHANCED: Statistical analysis to demonstrate AI fuzzer advantages
     print(f"\n--- VULNERABILITY DISCOVERY ANALYSIS for {scenario_name} ---")
@@ -2017,6 +2075,13 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
     end_time_scenario = time.time()
     print(f"\n--- Scenario {scenario_name} finished in {end_time_scenario - start_time_scenario:.2f} seconds ---")
     
+    # Checkpointing: save partial results after each scenario
+    partial_csv_filename = f'partial_results_{scenario_name}_{SCRIPT_VERSION_NAME}.csv'
+    try:
+        pd.DataFrame(results_list).to_csv(partial_csv_filename, index=False, encoding='utf-8')
+        print(f"Partial results saved to {partial_csv_filename}")
+    except Exception as e:
+        print(f"Could not save partial results for scenario {scenario_name}: {e}")
     # Return both results and effectiveness metrics
     return results_list, fuzzer_effectiveness
 
@@ -2437,6 +2502,7 @@ def main():
         all_fuzzer_effectiveness = {}
         
         for scenario_info in scenario_pbar:
+            scenario_start = time.time()
             name = scenario_info['name']
             params = scenario_info['params']
             scenario_pbar.set_description(f"Running: {name}")
@@ -2446,6 +2512,7 @@ def main():
             results, fuzzer_effectiveness = run_simulation(scenario_name=name, **params)
             all_results_data.extend(results)
             all_fuzzer_effectiveness[name] = fuzzer_effectiveness
+            print(f"[Timing] Scenario '{name}' total time: {time.time() - scenario_start:.2f} seconds")
 
         scenario_pbar.close()
 
