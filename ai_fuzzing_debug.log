@@ -1,2 +1,0 @@
-2025-08-29 11:24:31,933 INFO Mixed precision compatibility check (mixed_float16): OK
-Your GPU will likely run quickly with dtype policy mixed_float16 as it has compute capability of at least 7.0. Your GPU: NVIDIA H100 NVL, compute capability 9.0
