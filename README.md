@@ -34,7 +34,8 @@ The simulation evaluates vulnerabilities in two scenarios: Normal Mobility (urba
 
 2. **Run the Docker Container**:
    ```bash
-   docker run --gpus all -it --rm -v "$(pwd)":/workspace nvcr.io/nvidia/tensorflow:24.10-tf2-py3 bash
+   docker run --gpus all -it --rm -v "$(pwd)":/workspace ai-fuzzing bash
+
    ```
    - `--gpus all`: Enables all available GPUs.
    - `-it`: Runs the container interactively.

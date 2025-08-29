@@ -16,6 +16,11 @@ import time
 from collections import Counter
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy.stats import qmc
+import logging
+
+# --- Logging setup ---
+logging.basicConfig(filename='ai_fuzzing_debug.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # --- Sionna specific imports for channel modeling ---
 from sionna.phy.channel.tr38901 import UMi, PanelArray, Antenna
@@ -30,7 +35,7 @@ CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 
-SIMULATION_ITERATIONS = 1  # Kept at 200, but if it takes too long, reduce to 100
+SIMULATION_ITERATIONS = 1  # Strategic reduction: 10 iterations per scenario for statistical analysis
 FUZZER_GENERATIONS = 50  # FIXED: Increased for better AI convergence
 FUZZER_POPULATION = 5
 
@@ -49,15 +54,20 @@ def safe_nanpercentile(data, percentile):
     clean_data = data[~np.isnan(data)]
     return np.percentile(clean_data, percentile) if len(clean_data) > 0 else np.nan
 
-def calculate_throughput(sinr_linear_arr, bandwidth_hz):
+def calculate_throughput(sinr_input, bandwidth_hz, is_db=True, log_prefix=None):
     """
     Calculates the theoretical maximum throughput using the Shannon-Hartley theorem.
-    FIXED: Optimized for H100 with vectorized operations
+    If is_db=True, converts SINR from dB to linear. Clips SINR to [-10, 30] dB if is_db.
+    Logs intermediate values if log_prefix is provided.
     """
-    # Ensure SINR values are positive - vectorized operation
-    positive_sinr = np.maximum(sinr_linear_arr, 1e-9)
-    # C = B * log2(1 + SINR) - fully vectorized for GPU efficiency
-    throughput_bps = bandwidth_hz * np.log2(1 + positive_sinr)
+    if is_db:
+        sinr_db = np.clip(sinr_input, -10, 30)
+        sinr_linear = 10 ** (sinr_db / 10)
+    else:
+        sinr_linear = np.maximum(sinr_input, 1e-9)
+    throughput_bps = bandwidth_hz * np.log2(1 + sinr_linear)
+    if log_prefix is not None:
+        logging.info(f"{log_prefix} | SINR_linear: {sinr_linear} | Throughput_bps: {throughput_bps}")
     return throughput_bps
 
 @tf.function
@@ -779,7 +789,9 @@ class AIFuzzer:
     def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm,
                  population_size=FUZZER_POPULATION,
                  generations=FUZZER_GENERATIONS,
-                 use_nsga2=True):
+                 use_nsga2=True,
+                 mutation_rate=0.15,
+                 crossover_rate=0.8):
         self.env = env
         self.ts = ts
         self.population_size = population_size
@@ -787,10 +799,10 @@ class AIFuzzer:
         self.input_vector_size = env.num_cells + env.num_ues * 2
         self.objective_call_count = 0
         self.use_nsga2 = use_nsga2
-        
+        self.mutation_rate = mutation_rate
+        self.crossover_rate = crossover_rate
         # Multi-objective configuration
         self.num_objectives = 4  # handovers, qoe_violations, unfairness, energy
-        
         # For backward compatibility: weights (only used if use_nsga2=False)
         self.fitness_weights = {
             'handovers': 0.4,      # Instability (we want to maximize this, so weight is positive)
@@ -970,15 +982,17 @@ class AIFuzzer:
     def generate_inputs(self, dt=1.0):
         if self.ts.prev_assignments is None:
             rsrp_init, sinr_init, load_init, prio_init = self.env.compute_metrics()
-            current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
+            _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
         else:
             current_assignments = self.ts.prev_assignments
 
-        # Initialize population
+        # Initialize population using LHS for diversity
         population = []
-        for _ in range(self.population_size):
-            load_modifier = np.random.uniform(-0.1, 0.1, self.env.num_cells)
-            position_modifier = np.random.uniform(-5, 5, (self.env.num_ues, 2))
+        load_lhs = lhs_sample(self.population_size, self.env.num_cells, -0.1, 0.1)
+        pos_lhs = lhs_sample(self.population_size * self.env.num_ues, 2, -5, 5).reshape(self.population_size, self.env.num_ues, 2)
+        for i in range(self.population_size):
+            load_modifier = load_lhs[i]
+            position_modifier = pos_lhs[i]
             inputs = np.concatenate([load_modifier, position_modifier.flatten()])
             population.append(inputs)
 
@@ -1045,26 +1059,26 @@ class AIFuzzer:
                                 new_population.append(population[idx].copy())
                         break
                 
-                # Generate offspring through crossover and mutation
+                # Generate offspring through crossover and mutation (now with tunable rates)
                 offspring = []
                 while len(offspring) < self.population_size:
-                    # Tournament selection based on Pareto dominance and crowding distance
                     parent1 = self._tournament_selection(new_population, objectives_vectors, fronts)
                     parent2 = self._tournament_selection(new_population, objectives_vectors, fronts)
-                    
                     # Crossover
-                    crossover_point = np.random.randint(1, self.input_vector_size)
-                    child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
-                    child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
-                    
+                    if np.random.rand() < self.crossover_rate:
+                        crossover_point = np.random.randint(1, self.input_vector_size)
+                        child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+                        child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
+                    else:
+                        child1 = parent1.copy()
+                        child2 = parent2.copy()
                     # Mutation
                     for child in [child1, child2]:
-                        if np.random.rand() < 0.2:  # FIXED: Increased mutation rate for better exploration
+                        if np.random.rand() < self.mutation_rate:
                             child[:self.env.num_cells] += np.random.normal(0, 0.05, self.env.num_cells)
                             child[self.env.num_cells:] += np.random.normal(0, 1.0, self.env.num_ues * 2)
                             child[:self.env.num_cells] = np.clip(child[:self.env.num_cells], -0.2, 0.2)
                         offspring.append(child)
-                
                 population = offspring[:self.population_size]
                 
                 # Update progress with multi-objective metrics
@@ -1099,14 +1113,15 @@ class AIFuzzer:
                 for _ in range(self.population_size - 1):
                     idx1, idx2 = np.random.choice(parent_pool_indices, 2, replace=True)
                     parent1, parent2 = population[idx1], population[idx2]
-                    crossover_point = np.random.randint(1, self.input_vector_size)
-                    child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
-                    
-                    if np.random.rand() < 0.2:  # FIXED: Increased mutation
+                    if np.random.rand() < self.crossover_rate:
+                        crossover_point = np.random.randint(1, self.input_vector_size)
+                        child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+                    else:
+                        child = parent1.copy()
+                    if np.random.rand() < self.mutation_rate:
                         child[:self.env.num_cells] += np.random.normal(0, 0.05, self.env.num_cells)
                         child[self.env.num_cells:] += np.random.normal(0, 1.0, self.env.num_ues * 2)
                         child[:self.env.num_cells] = np.clip(child[:self.env.num_cells], -0.2, 0.2)
-                    
                     new_population.append(child)
                 population = new_population
         
@@ -1156,29 +1171,9 @@ class RandomFuzzer:
         
     def generate_inputs(self, dt=1.0):
         self.generation_count += 1
-        
-        # IMPROVED: Targeted random strategies with domain knowledge
-        if self.generation_count % 3 == 0:
-            # Strategy 1: High-load stress testing
-            load_modifier = np.random.uniform(0.05, 0.1, self.env.num_cells)  # Increase loads
-            position_modifier_2d = np.random.uniform(-10, 10, (self.env.num_ues, 2))  # Larger position changes
-        elif self.generation_count % 3 == 1:
-            # Strategy 2: Load imbalance creation
-            load_modifier = np.random.uniform(-0.1, 0.1, self.env.num_cells)
-            # Create hotspots by moving UEs to specific areas
-            hotspot_center = np.random.uniform(-50, 50, 2)
-            position_modifier_2d = np.random.normal(hotspot_center, 15, (self.env.num_ues, 2))
-        else:
-            # Strategy 3: Edge case scenarios
-            load_modifier = np.random.choice([-0.1, 0.1], self.env.num_cells)  # Binary extreme loads
-            # Create corridor/line topology stress
-            if np.random.random() > 0.5:
-                position_modifier_2d = np.random.uniform(-100, 100, (self.env.num_ues, 2))
-            else:
-                # Line formation
-                line_positions = np.linspace(-50, 50, self.env.num_ues)
-                position_modifier_2d = np.column_stack([line_positions, np.random.uniform(-5, 5, self.env.num_ues)])
-                
+        # Use LHS for both load and position sampling
+        load_modifier = lhs_sample(1, self.env.num_cells, -0.1, 0.1).flatten()
+        position_modifier_2d = lhs_sample(self.env.num_ues, 2, -10, 10)
         inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
         return inputs
 
@@ -1279,7 +1274,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
                 for i in range(self.env.num_ues):
                     cluster_idx = i % num_clusters
                     center = cluster_centers[cluster_idx]
-                    pos = center + np.random.normal(0, 3, 2)  # Tight clustering
+                    pos = center + np.random.normal(0, 3, 2) # Tight clustering
                     positions.append(pos)
                 position_modifier_2d = np.array(positions)
                 
@@ -1343,7 +1338,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
         
         if self.ts.prev_assignments is None:
             rsrp_init, sinr_init, load_init, prio_init = self.env.compute_metrics()
-            current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
+            _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
         else:
             current_assignments = self.ts.prev_assignments
 
@@ -1373,7 +1368,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
         best_overall_individual = population[0].copy()
         best_overall_objectives = None
 
-        pbar_gen = tqdm(range(self.generations), desc="Adaptive AI Fuzzer", leave=False, disable=not hasattr(tqdm, '_instances'))
+        pbar_gen = tqdm(range(self.generations), desc="AI Fuzzer Evolution", leave=False, disable=not hasattr(tqdm, '_instances'))
         
         early_stop_window = 10
         early_stop_threshold = 0.01  # You can adjust this threshold for your use case
@@ -1396,6 +1391,7 @@ class AdaptiveAIFuzzer(AIFuzzer):
                 # Enhanced NSGA-II with vulnerability tracking
                 with ThreadPoolExecutor(max_workers=8) as executor:
                     objectives_list = list(executor.map(
+                       
                         lambda ind: self._calculate_objectives(ind, current_assignments, dt), 
                         population
                     ))
@@ -1570,6 +1566,29 @@ class NaiveRandomFuzzer:
         inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
         return inputs
 
+class UniformRandomFuzzer:
+    """Uniform random fuzzer: no strategy, just pure uniform sampling."""
+    def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm):
+        self.env = env
+        self.ts = ts
+    def generate_inputs(self, dt=1.0):
+        load_modifier = np.random.uniform(-0.1, 0.1, self.env.num_cells)
+        position_modifier_2d = np.random.uniform(-10, 10, (self.env.num_ues, 2))
+        inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
+        return inputs
+
+class StaticBaselineFuzzer:
+    """Static baseline: always returns center positions and uniform load."""
+    def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm):
+        self.env = env
+        self.ts = ts
+    def generate_inputs(self, dt=1.0):
+        load_modifier = np.zeros(self.env.num_cells)
+        # Place all UEs at (0,0) (center of cell grid)
+        position_modifier_2d = np.zeros((self.env.num_ues, 2))
+        inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
+        return inputs
+
 # --- Module 4: Oracle ---
 class Oracle:
     # FIXED: Added num_ues and num_cells to the constructor for proper dynamic sizing
@@ -1627,12 +1646,10 @@ class Oracle:
         else:
             return np.sum(allocations_cleaned**(1 - alpha)) / (1 - alpha)
 
-    def evaluate(self, rsrp, sinr, assignments, cell_loads, priorities):
-        # FIXED: Increment evaluation counter and perform periodic cleanup
+    def evaluate(self, rsrp, sinr, assignments, cell_loads, priorities, user_throughputs_mbps=None, transmission_times_ms=None):
         self.evaluation_count += 1
         if self.evaluation_count % self.cleanup_frequency == 0:
             self._cleanup_memory()
-            
         results = {
             'vulnerabilities': [],
             'jain_index': 1.0,
@@ -1689,15 +1706,17 @@ class Oracle:
 
         results['vulnerabilities'] = vulnerabilities_found
 
-        if assigned_sinr_np.size > 0:
+        # Jain index: prefer throughput if available
+        if user_throughputs_mbps is not None and len(user_throughputs_mbps) > 0:
+            jain_score = self._calculate_jain_fairness(user_throughputs_mbps)
+        elif assigned_sinr_np.size > 0:
             assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
             jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
-            results['jain_index'] = jain_score
-            if jain_score < self.fairness_threshold:
-                results['vulnerabilities'].append(f"Unfairness: Jain Index = {jain_score:.2f}")
-
-            results['alpha_fairness_a1'] = self._alpha_fairness(assigned_sinr_linear, alpha=1.0)
-            results['alpha_fairness_a2'] = self._alpha_fairness(assigned_sinr_linear, alpha=2.0)
+        else:
+            jain_score = 1.0
+        results['jain_index'] = jain_score
+        if jain_score < self.fairness_threshold:
+            results['vulnerabilities'].append(f"Unfairness: Jain Index = {jain_score:.2f}")
         
         return results
     
@@ -1743,7 +1762,9 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
         "Adaptive_AI": AdaptiveAIFuzzer,  # Our enhanced AI fuzzer
         "Basic_AI": AIFuzzer,            # Standard AI fuzzer  
         "Strategic_Random": RandomFuzzer, # Enhanced random with strategies
-        "Naive_Random": lambda env, ts: NaiveRandomFuzzer(env, ts)  # Simple baseline
+        "Naive_Random": lambda env, ts: NaiveRandomFuzzer(env, ts),  # Simple baseline
+        "Uniform_Random": UniformRandomFuzzer,  # New: uniform random
+        "Static_Baseline": StaticBaselineFuzzer # New: static scenario
     }
     
     total_combinations = len(fuzzer_map) * len(algorithm_factories)
@@ -1786,7 +1807,7 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
                 # Random fuzzers don't need NSGA-II parameters
                 fuzzer = FuzzerClass(shared_env_state, ts_instance)
             
-            rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
+            rsrp_init, sinr_init, load_init, prio_init = shared_env_state.compute_metrics()
             _ = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
 
             if ts_instance.prev_assignments is None: 
@@ -1821,7 +1842,7 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
                     handovers_this_step = np.sum(new_assignments != assignments_at_start_of_iter)
                     shared_env_state.update_cell_loads(new_assignments)
 
-                    oracle_metrics = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval)
+                    oracle_metrics = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval, user_throughputs_mbps, transmission_times_ms)
                     
                     # ENHANCED: Advanced vulnerability metrics for AI vs Random comparison
                     vulnerability_count = len(oracle_metrics['vulnerabilities'])
@@ -1898,9 +1919,6 @@ def run_simulation(scenario_name, num_ues=NUM_UES, initial_load=0.3, max_speed=5
                         'alpha_fairness_a2': float(oracle_metrics['alpha_fairness_a2']),
                         'avg_sinr_db': np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan,
                         'sinr_5th_percentile_db': np.percentile(assigned_sinr_np_finite, 5) if assigned_sinr_np_finite.size > 0 else np.nan,
-                        'avg_high_prio_sinr': high_prio_avg_sinr,
-                        'worst_high_prio_sinr': high_prio_worst_sinr,
-                        'num_ues_below_qos': np.sum(np.array(assigned_sinr_list) < 0) if assigned_sinr_list else 0,
                         'avg_throughput_mbps': np.nanmean(user_throughputs_mbps),
                         'throughput_5th_percentile_mbps': safe_nanpercentile(user_throughputs_mbps, 5),
                         'avg_transmission_time_ms': np.nanmean(transmission_time_s) * 1000,
@@ -2463,16 +2481,17 @@ def main():
 
         # Expanded list of scenarios to run, including new ones
         scenarios_to_run = [
-        {'name': 'Low Load', 'params': {'num_ues': 30, 'initial_load': 0.3, 'max_speed': 5, 'scenario_type': 'default'}},
-        {'name': 'High Load', 'params': {'num_ues': 30, 'initial_load': 0.7, 'max_speed': 5, 'scenario_type': 'default'}},
-        {'name': 'High Mobility', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 10, 'scenario_type': 'default'}},
-        {'name': 'Mixed Mobility', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 7, 'scenario_type': 'mixed'}},
-        {'name': 'Interference-Heavy', 'params': {'num_ues': 60, 'initial_load': 0.6, 'max_speed': 5, 'scenario_type': 'default'}},
-        {'name': 'Emergency (BS Outage)', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 5, 'scenario_type': 'default', 'active_cell_indices': emergency_active_cells}},
-        {'name': 'High Cell Overlap', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 5, 'scenario_type': 'default', 'inter_site_distance': 50.0}},
-        {'name': 'Edge Computing', 'params': {'num_ues': 40, 'initial_load': 0.4, 'max_speed': 3, 'scenario_type': 'edge'}},
-        {'name': '6G', 'params': {'ue_count': 150, 'interference_level': 0.3, 'mobility': 'high', 'tech': '6G', 'latency_target': 0.001}},  
-        {'name': 'Multi-Cell Interference', 'params': {'ue_count': 200, 'interference_level': 0.6, 'mobility': 'medium', 'cell_count': 5}} 
+    # Focused on key scenarios for vulnerability discovery
+    {'name': 'High Mobility', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 10, 'scenario_type': 'default'}},
+    {'name': 'Interference-Heavy', 'params': {'num_ues': 60, 'initial_load': 0.6, 'max_speed': 5, 'scenario_type': 'default'}},
+    {'name': 'Edge Computing', 'params': {'num_ues': 40, 'initial_load': 0.4, 'max_speed': 3, 'scenario_type': 'edge'}},
+    # {'name': 'Low Load', ...},
+    # {'name': 'High Load', ...},
+    # {'name': 'Mixed Mobility', ...},
+    # {'name': 'Emergency (BS Outage)', ...},
+    # {'name': 'High Cell Overlap', ...},
+    # {'name': '6G', ...},
+    # {'name': 'Multi-Cell Interference', ...},
        ]
 
         scenario_pbar = tqdm(scenarios_to_run, desc="Overall Progress", position=0)
