@@ -42,10 +42,10 @@ if physical_devices:
         "constant_folding": True,      # Optimize constant expressions
         "shape_optimization": True,    # Optimize based on tensor shapes
         "remapping": True,             # Remap operations for better performance
-        "arithmetic_optimization": True,   # Optimize arithmetic operations
-        "dependency_optimization": True,   # Optimize control dependencies
-        "loop_optimization": True,     # Optimize loops
-        "function_optimization": True,   # Optimize function calls
+        "arithmetic_optimization": True,    # Optimize arithmetic operations
+        "dependency_optimization": True,    # Optimize control dependencies
+        "loop_optimization": True,    # Optimize loops
+        "function_optimization": True,    # Optimize function calls
         "debug_stripper": True,        # Remove debug operations
     })
     
@@ -74,8 +74,9 @@ except ImportError:
     exit()
 
 # --- Global Constants ---
-NUM_CELLS = 19
-NUM_UES = 30
+# MODIFICATION 1: Simplified network to create a sparser vulnerability space
+NUM_CELLS = 7
+NUM_UES = 15 
 BANDWIDTH = 13.68e6
 CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
@@ -90,7 +91,7 @@ FUZZER_POPULATION = 10
 ENABLE_NSGA2_FUZZER = True
 
 ENABLE_TF_DEVICE_LOGGING = True
-SCRIPT_VERSION_NAME = "v27_final_batched_gpu"
+SCRIPT_VERSION_NAME = "v28_strategic_fuzzing"
 
 # --- Helper Functions ---
 def safe_nanpercentile(data, percentile):
@@ -133,12 +134,10 @@ class NetworkEnvironment:
         self.batch_size = 128
         self.num_ues = num_ues
         
-        if active_cell_indices is None:
-            self.num_cells = NUM_CELLS
-            self.active_cell_indices = list(range(NUM_CELLS))
-        else:
-            self.num_cells = len(active_cell_indices)
-            self.active_cell_indices = active_cell_indices
+        # The number of cells is now determined by the global constant
+        self.num_cells = NUM_CELLS
+        self.active_cell_indices = list(range(NUM_CELLS))
+
 
         self.initial_load_param = initial_load
         self.max_speed_param = scenario_max_speed
@@ -147,9 +146,9 @@ class NetworkEnvironment:
 
         # Antenna configuration as per the paper
         self.ut_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1, polarization='single', polarization_type='V',
-                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY, precision="single")
+                                     antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY, precision="single")
         self.bs_array = PanelArray(num_rows_per_panel=1, num_cols_per_panel=1, polarization='single', polarization_type='V',
-                                   antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY, precision="single")
+                                     antenna_pattern='omni', carrier_frequency=CARRIER_FREQUENCY, precision="single")
 
         # 3GPP UMi channel model as per the paper
         self.channel_model_3gpp = UMi(
@@ -493,7 +492,7 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
         current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None and len(self.prev_assignments) > ue_idx else 0
         current_sinr = sinr[ue_idx, current_cell] if 0 <= current_cell < self.num_cells and ue_idx < sinr.shape[0] else -30
         avg_load = np.mean(cell_loads)
-        max_neighbor_sinr = np.max([sinr[ue_idx, i] for i in range(self.num_cells) if i != current_cell])
+        max_neighbor_sinr = np.max([sinr[ue_idx, i] for i in range(self.num_cells) if i != current_cell]) if self.num_cells > 1 else -30
         load_imbalance = np.std(cell_loads)
         
         state = (
@@ -636,7 +635,8 @@ class AIFuzzer:
         self.input_vector_size = env.num_cells + env.num_ues * 2
         self.objective_call_count = 0
         self.use_nsga2 = use_nsga2
-        self.num_objectives = 4 # handovers, qoe_violations, unfairness, energy
+        # MODIFICATION 3: Change objectives to be more specific
+        self.num_objectives = 3 # instability, qoe_degradation, unfairness
         self.pareto_archive = []
         self.vulnerability_memory = []
 
@@ -652,8 +652,8 @@ class AIFuzzer:
 
     def _calculate_objectives(self, inputs, current_assignments, dt_fitness=1.0):
         """
-        Calculates the four vulnerability objectives for a given batch of fuzzer inputs.
-        This method is now optimized for GPU batch processing.
+        Calculates the vulnerability objectives for a given batch of fuzzer inputs.
+        The objectives are now more specific to guide the fuzzer towards complex vulnerabilities.
         """
         self.objective_call_count += 1
         
@@ -663,19 +663,16 @@ class AIFuzzer:
         position_modifiers_3d = np.concatenate([position_modifiers_2d, np.zeros((batch_size, self.env.num_ues, 1))], axis=2)
         position_modifiers_tf = tf.constant(position_modifiers_3d, dtype=tf.float32)
 
-        # --- شروع اصلاحات ---
-        # 1. حالت کامل اولیه را قبل از هر کاری ذخیره کن
-        full_original_ue_loc = self.env.ue_loc.read_value() 
+        # Correctly save the full original state before modification
+        full_original_ue_loc = self.env.ue_loc.read_value()
         original_cell_loads = self.env.cell_loads.copy()
         original_ts_prev_assignments = self.ts.prev_assignments.copy() if self.ts.prev_assignments is not None else None
         
-        # حالا فقط یک سطر از آن را برای تکثیر در فازر استفاده کن
+        # Use only the first slice of the state for fuzzing
         base_ue_loc_for_fuzzing = full_original_ue_loc[:1]
         
         # Replicate initial state for each batch item
         base_ue_loc = tf.tile(base_ue_loc_for_fuzzing, [batch_size, 1, 1])
-        # --- پایان اصلاحات اولیه ---
-
         temp_loads_batch = np.clip(np.tile(original_cell_loads, (batch_size, 1)) + load_modifiers, 0, 1)
         
         # Apply fuzzing perturbations to create a new batch of UE locations
@@ -690,48 +687,46 @@ class AIFuzzer:
             tf.tile(self.env.ue_velocities[:1], [batch_size, 1, 1]),
             tf.tile(self.env.in_state[:1], [batch_size, 1])
         )
+        
+        # Convert tensors to numpy for CPU-based calculations
+        rsrp_batch_np = rsrp_batch.numpy()
+        sinr_batch_np = sinr_batch.numpy()
 
         results = []
         for i in range(batch_size):
-            rsrp = rsrp_batch.numpy()[i]
-            sinr = sinr_batch.numpy()[i]
+            rsrp = rsrp_batch_np[i]
+            sinr = sinr_batch_np[i]
             priorities = self.env.ue_priorities.copy()
             
-            # --- شروع اصلاحات ---
-            # 2. از خود `current_assignments` (که یک آرایه است) استفاده کن و آن را ایندکس نزن
-            self.ts.prev_assignments = current_assignments 
-            # --- پایان اصلاحات ---
+            # Ensure the TS algorithm starts from the same previous state for each fuzzer individual
+            self.ts.prev_assignments = current_assignments
 
             new_assignments = self.ts.assign_ues(rsrp, sinr, temp_loads_batch[i], priorities, dt_fitness)
             new_assignments = np.clip(new_assignments, 0, self.env.num_cells - 1)
 
-            objectives = {}
-            num_handovers = np.sum(new_assignments != self.ts.prev_assignments)
-            objectives['handovers'] = num_handovers / max(1, self.env.num_ues)
-            
-            high_prio_mask = (priorities == 1)
-            high_prio_ues = np.sum(high_prio_mask)
-            qoe_violations = 0.0
-            if high_prio_ues > 0:
-                assigned_sinr_hp_ues = [sinr[j, new_assignments[j]] for j in range(self.env.num_ues) if high_prio_mask[j]]
-                # سخت‌تر کردن شرط: کمتر از 1.0 dB به جای 5.0
-                qoe_violations = np.sum(np.array(assigned_sinr_hp_ues) < 1.0)
-            objectives['qoe_violation'] = qoe_violations / high_prio_ues if high_prio_ues > 0 else 0.0
-            
+            # MODIFICATION 3.1: Calculate metrics needed for the new complex objectives
             assigned_sinr_np = np.array([sinr[j, new_assignments[j]] for j in range(self.env.num_ues)])
             assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
+            user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
+            throughput_5th_mbps = safe_nanpercentile(user_throughputs_bps, 5) / 1e6
             jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
-            # سخت‌تر کردن شرط برای unfairness: اگر jain_score < 0.1 باشد، unfairness بالاتر
-            objectives['unfairness'] = max(1.0 - jain_score, 0.0) if jain_score < 0.1 else 1.0 - jain_score
-            objectives['energy_consumption'] = num_handovers / max(1, self.env.num_ues)
+            handover_rate = np.sum(new_assignments != self.ts.prev_assignments) / max(1, self.env.num_ues)
             
-            results.append([objectives['handovers'], objectives['qoe_violation'], objectives['unfairness'], objectives['energy_consumption']])
+            # MODIFICATION 3.2: Define new, more targeted objectives for the GA
+            # Objective 1: Maximize instability (high handover rate is bad)
+            objective_instability = handover_rate
+            
+            # Objective 2: Maximize QoE degradation (low throughput for weak users is bad)
+            # We want to minimize throughput, so we maximize its inverse
+            objective_qoe_degradation = 1.0 / (throughput_5th_mbps + 0.1) # Add 0.1 to avoid division by zero
 
-        # --- شروع اصلاحات ---
-        # 3. حالت کامل و اولیه را به متغیرها برگردان
+            # Objective 3: Maximize unfairness (low Jain index is bad)
+            objective_unfairness = 1.0 - jain_score
+            
+            results.append([objective_instability, objective_qoe_degradation, objective_unfairness])
+
+        # Restore the full original state to the environment variable
         self.env.ue_loc.assign(full_original_ue_loc)
-        # --- پایان اصلاحات ---
-        
         self.env.cell_loads = original_cell_loads
         self.ts.prev_assignments = original_ts_prev_assignments
         
@@ -823,7 +818,7 @@ class AIFuzzer:
                 current_distance = distances[front_indices.index(idx)]
                 if current_distance > best_distance:
                     best_candidate_idx = idx
-                
+            
         return population[best_candidate_idx]
 
     def generate_inputs(self, dt=1.0):
@@ -853,7 +848,7 @@ class AIFuzzer:
             # Add successful vulnerability patterns to memory
             for i, obj_vector in enumerate(objectives_vectors):
                 vulnerability_score = np.sum(obj_vector)
-                if vulnerability_score > 1.5:
+                if vulnerability_score > 1.5: # A threshold to consider an input as "interesting"
                     self.vulnerability_memory.append({
                         'individual': population[i].copy(),
                         'objectives': obj_vector,
@@ -903,7 +898,7 @@ class AIFuzzer:
                     if np.random.rand() < 0.2:
                         mutation_influence = 0.3
                         if len(self.vulnerability_memory) > 0:
-                            memory_pattern = np.random.choice(self.vulnerability_memory)
+                            memory_pattern = random.choice(self.vulnerability_memory)
                             child = (1 - mutation_influence) * child + mutation_influence * memory_pattern['individual']
                         
                         child[:self.env.num_cells] += np.random.normal(0, 0.08, self.env.num_cells)
@@ -914,11 +909,10 @@ class AIFuzzer:
             population = offspring[:self.population_size]
             
             avg_objectives = np.mean(objectives_vectors, axis=0)
-            vulnerability_count = len([obj for obj in objectives_vectors if np.sum(obj) > 1.0])
             pbar_gen.set_postfix({
-                'HO': f'{avg_objectives[0]:.2f}', 'QoE': f'{avg_objectives[1]:.2f}',
-                'UF': f'{avg_objectives[2]:.2f}', 'EN': f'{avg_objectives[3]:.2f}',
-                'Vulns': vulnerability_count
+                'Instability': f'{avg_objectives[0]:.2f}', 
+                'QoE Degrad.': f'{avg_objectives[1]:.2f}',
+                'Unfairness': f'{avg_objectives[2]:.2f}'
             })
             
         pbar_gen.close()
@@ -941,12 +935,13 @@ class Oracle:
     """
     Evaluates network performance and detects vulnerabilities based on predefined rules.
     """
-    def __init__(self, num_ues, num_cells, ping_pong_window=4, ping_pong_threshold=2, qos_sinr_threshold=5.0, fairness_threshold=0.4):
+    def __init__(self, num_ues, num_cells, ping_pong_window=4, ping_pong_threshold=3, qos_throughput_threshold_mbps=2.0, fairness_threshold=0.2):
         self.num_ues = num_ues
         self.num_cells = num_cells
         self.ping_pong_window = ping_pong_window
-        self.ping_pong_threshold = ping_pong_threshold
-        self.qos_sinr_threshold = qos_sinr_threshold
+        # MODIFICATION 2.1: Made ping-pong threshold stricter
+        self.ping_pong_threshold = ping_pong_threshold 
+        self.qos_throughput_threshold_mbps = qos_throughput_threshold_mbps
         self.fairness_threshold = fairness_threshold
         self.handover_history = {}
         
@@ -981,31 +976,35 @@ class Oracle:
                 if changes >= self.ping_pong_threshold:
                     num_ping_pongs_detected_this_step += 1
                     
-        if num_ping_pongs_detected_this_step >= self.ping_pong_threshold:
+        if num_ping_pongs_detected_this_step > (self.num_ues * 0.1): # Only flag if >10% of UEs are ping-ponging
             vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating")
 
         temp_assigned_sinr_list = [sinr[i, assignments[i]] if 0 <= assignments[i] < self.num_cells else np.nan for i in range(self.num_ues)]
         assigned_sinr_np_finite = np.array([s for s in temp_assigned_sinr_list if pd.notna(s)])
         
-        high_priority_mask = (priorities == 1)
-        assigned_sinr_hp_ues_list = [sinr[i, assignments[i]] for i in range(self.num_ues) if high_priority_mask[i]]
-        assigned_sinr_hp_ues_np = np.array(assigned_sinr_hp_ues_list) if assigned_sinr_hp_ues_list else np.array([])
+        # Calculate throughput for vulnerability check
+        assigned_sinr_linear = 10**(assigned_sinr_np_finite / 10.0)
+        user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
+        throughput_5th_mbps = safe_nanpercentile(user_throughputs_bps, 5) / 1e6
         
         has_qoe_violation = False
-        if assigned_sinr_hp_ues_np.size > 0:
-            avg_sinr_high = np.mean(assigned_sinr_hp_ues_np)
-            if avg_sinr_high < self.qos_sinr_threshold:
-                vulnerabilities_found.append(f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB")
-                has_qoe_violation = True
+        if throughput_5th_mbps < self.qos_throughput_threshold_mbps:
+            vulnerabilities_found.append(f"QoS Violation: 5th Percentile Throughput = {throughput_5th_mbps:.2f} Mbps")
+            has_qoe_violation = True
 
         jain_score = 1.0
         has_unfairness = False
         if assigned_sinr_np_finite.size > 0:
-            assigned_sinr_linear = 10**(assigned_sinr_np_finite / 10.0)
             jain_score = self._jain_fairness(assigned_sinr_linear)
             if jain_score < self.fairness_threshold:
                 vulnerabilities_found.append(f"Unfairness: Jain Index = {jain_score:.2f}")
                 has_unfairness = True
+
+        # MODIFICATION 2.2: Define the new, complex vulnerability
+        is_critical_failure = (has_qoe_violation and has_unfairness and (num_ping_pongs_detected_this_step > 5))
+        if is_critical_failure:
+            vulnerabilities_found.append("CRITICAL FAILURE: Low QoE, High Unfairness, and System Instability Co-occurred")
+
         
         # Calculate additional metrics for later analysis
         handover_rate = np.sum(assignments != prev_assignments) / self.num_ues if prev_assignments is not None else 0
@@ -1015,11 +1014,11 @@ class Oracle:
             'jain_index': jain_score,
             'avg_sinr_db': np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan,
             'sinr_5th_percentile_db': safe_nanpercentile(assigned_sinr_np_finite, 5),
-            'avg_high_prio_sinr': np.mean(assigned_sinr_hp_ues_np) if assigned_sinr_hp_ues_np.size > 0 else np.nan,
             'handover_rate': handover_rate,
             'has_ping_pong': num_ping_pongs_detected_this_step > 0,
             'has_qoe_violation': has_qoe_violation,
             'has_unfairness': has_unfairness,
+            'is_critical_failure': is_critical_failure
         }
     
 # --- Module 5: Main Simulation Loop and Analysis ---
@@ -1051,6 +1050,7 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     for fuzzer_name, fuzzer_factory in fuzzer_map.items():
         fuzzer_effectiveness[fuzzer_name] = {
             'vulnerability_counts': [],
+            'critical_failure_counts': [], # New metric to track
             'vulnerability_severities': [],
             'handover_rates': [],
             'qoe_violations': [],
@@ -1089,7 +1089,11 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                     pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((num_ues, 1))])
 
                     shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
-                    shared_env_state.ue_loc.assign(shared_env_state.ue_loc + tf.constant(pos_modifier_3d_np[np.newaxis,...], dtype=tf.float32))
+                    # The fuzzer now operates on a single state, so we apply perturbations to the first slice of the batch
+                    current_loc = shared_env_state.ue_loc.read_value()
+                    new_loc = tf.tensor_scatter_nd_update(current_loc, [[0]], [current_loc[0] + tf.constant(pos_modifier_3d_np, dtype=tf.float32)])
+                    shared_env_state.ue_loc.assign(new_loc)
+                    
                     shared_env_state.update_ue_positions_and_velocities(dt=1.0)
                     
                     rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
@@ -1102,7 +1106,7 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                     assigned_sinr_list = [sinr[i, new_assignments[i]] if 0 <= new_assignments[i] < shared_env_state.num_cells else np.nan for i in range(num_ues)]
                     assigned_sinr_np_finite = np.array([s for s in assigned_sinr_list if pd.notna(s)])
                     
-                    assigned_sinr_linear = 10**(np.array(assigned_sinr_list, dtype=np.float32) / 10.0)
+                    assigned_sinr_linear = 10**(np.array(assigned_sinr_np_finite, dtype=np.float32) / 10.0)
                     user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
                     user_throughputs_mbps = user_throughputs_bps / 1e6
                     transmission_time_ms = calculate_transmission_delay_ms(user_throughputs_bps)
@@ -1123,22 +1127,24 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                         'load_std': np.std(shared_env_state.cell_loads),
                         'has_ping_pong': oracle_metrics['has_ping_pong'],
                         'has_qoe_violation': oracle_metrics['has_qoe_violation'],
-                        'has_unfairness': oracle_metrics['has_unfairness']
+                        'has_unfairness': oracle_metrics['has_unfairness'],
+                        'is_critical_failure': oracle_metrics['is_critical_failure']
                     })
                     
                     fuzzer_effectiveness[fuzzer_name]['vulnerability_counts'].append(len(oracle_metrics['vulnerabilities']))
-                    if 'severity' in oracle_metrics:
-                        fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(oracle_metrics['severity'])
-                    else:
-                        fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(
-                            oracle_metrics['has_ping_pong'] * 3 + oracle_metrics['has_qoe_violation'] * 2 + oracle_metrics['has_unfairness'] * 1
-                        )
+                    fuzzer_effectiveness[fuzzer_name]['critical_failure_counts'].append(oracle_metrics['is_critical_failure'])
+                    
+                    severity = (oracle_metrics['has_ping_pong'] * 1 + 
+                                oracle_metrics['has_qoe_violation'] * 2 + 
+                                oracle_metrics['has_unfairness'] * 2 +
+                                oracle_metrics['is_critical_failure'] * 5) # Critical failures are most severe
+                    fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(severity)
                     fuzzer_effectiveness[fuzzer_name]['handover_rates'].append(oracle_metrics['handover_rate'])
                     fuzzer_effectiveness[fuzzer_name]['qoe_violations'].append(oracle_metrics['has_qoe_violation'])
                     fuzzer_effectiveness[fuzzer_name]['unfairness_events'].append(oracle_metrics['has_unfairness'])
                     fuzzer_effectiveness[fuzzer_name]['ping_pong_events'].append(oracle_metrics['has_ping_pong'])
                     
-                    iter_pbar.set_postfix({'Vulns': len(oracle_metrics['vulnerabilities']), '5th Thrpt': f'{safe_nanpercentile(user_throughputs_mbps, 5):.2f}Mbps'})
+                    iter_pbar.set_postfix({'Vulns': len(oracle_metrics['vulnerabilities']), 'Crit.': oracle_metrics['is_critical_failure'], '5th Thrpt': f'{safe_nanpercentile(user_throughputs_mbps, 5):.2f}Mbps'})
                 except Exception as e:
                     print(f"ERROR in iteration {iteration} for {fuzzer_name}+{actual_algo_name}: {e}")
                     continue
@@ -1166,31 +1172,37 @@ def summarize_and_plot(df, effectiveness_data, script_version):
         for fuzzer_name, fuzzer_data in scenario_data.items():
             if fuzzer_name not in overall_effectiveness:
                 overall_effectiveness[fuzzer_name] = {
-                    'total_vulns': 0, 'total_severity': 0, 'scenarios': 0
+                    'total_vulns': 0, 'total_critical_failures': 0, 'total_severity': 0, 'runs': 0
                 }
             overall_effectiveness[fuzzer_name]['total_vulns'] += sum(fuzzer_data['vulnerability_counts'])
+            overall_effectiveness[fuzzer_name]['total_critical_failures'] += sum(fuzzer_data['critical_failure_counts'])
             overall_effectiveness[fuzzer_name]['total_severity'] += sum(fuzzer_data['vulnerability_severities'])
-            overall_effectiveness[fuzzer_name]['scenarios'] += 1
+            overall_effectiveness[fuzzer_name]['runs'] += len(fuzzer_data['vulnerability_counts'])
 
     print("\nOVERALL FUZZER EFFECTIVENESS ACROSS ALL SCENARIOS:")
     for fuzzer, metrics in overall_effectiveness.items():
         print(f"  {fuzzer}:")
         print(f"    Total Vulnerabilities Found: {metrics['total_vulns']}")
-        print(f"    Average Vulnerability Severity: {metrics['total_severity'] / max(1, metrics['total_vulns']):.2f}")
+        print(f"    Total CRITICAL FAILURES Found: {metrics['total_critical_failures']}")
+        print(f"    Average Vulnerability Severity: {metrics['total_severity'] / max(1, metrics['runs']):.2f}")
     
+    # Statistical test on the number of critical failures found
     if 'AI-Fuzzer' in overall_effectiveness and 'Random-Fuzzer' in overall_effectiveness:
-        ai_vulns = [sum(eff['AI-Fuzzer']['vulnerability_counts']) for eff in effectiveness_data.values() if 'AI-Fuzzer' in eff]
-        random_vulns = [sum(eff['Random-Fuzzer']['vulnerability_counts']) for eff in effectiveness_data.values() if 'Random-Fuzzer' in eff]
+        ai_critical_failures = []
+        random_critical_failures = []
+        for eff in effectiveness_data.values():
+            if 'AI-Fuzzer' in eff: ai_critical_failures.extend(eff['AI-Fuzzer']['critical_failure_counts'])
+            if 'Random-Fuzzer' in eff: random_critical_failures.extend(eff['Random-Fuzzer']['critical_failure_counts'])
 
-        if len(ai_vulns) > 1 and len(random_vulns) > 1:
+        if len(ai_critical_failures) > 1 and len(random_critical_failures) > 1:
             try:
-                t_stat, p_value = stats.ttest_ind(ai_vulns, random_vulns, equal_var=False)
-                print("\nSTATISTICAL SIGNIFICANCE (T-TEST) for Total Vulnerabilities:")
+                t_stat, p_value = stats.ttest_ind(ai_critical_failures, random_critical_failures, equal_var=False, alternative='greater')
+                print("\nSTATISTICAL SIGNIFICANCE (T-TEST) for CRITICAL FAILURES (One-sided: AI > Random):")
                 print(f"  T-statistic: {t_stat:.3f}, P-value: {p_value:.5f}")
                 if p_value < 0.05:
-                    print("  Result: The difference is statistically significant (p < 0.05).")
+                    print("  Result: The AI fuzzer found a statistically significant GREATER number of critical failures (p < 0.05).")
                 else:
-                    print("  Result: No statistically significant difference found.")
+                    print("  Result: No statistically significant difference found in finding critical failures.")
             except Exception as e:
                 print(f"Could not perform t-test: {e}")
     
@@ -1263,11 +1275,10 @@ def main():
         else:
             print("--- No GPU detected by TensorFlow. Running on CPU. ---")
             
-        emergency_active_cells = [i for i in range(NUM_CELLS) if i not in [0, 1, 5, 10]]
+        # MODIFICATION 1.1: Adjust scenario parameters for the simplified network
         scenarios_to_run = [
-            {'name': 'High Mobility', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 10, 'scenario_type': 'default'}},
-            {'name': 'Emergency (BS Outage)', 'params': {'num_ues': 30, 'initial_load': 0.5, 'max_speed': 5, 'scenario_type': 'default', 'active_cell_indices': emergency_active_cells}},
-            {'name': 'High Load', 'params': {'num_ues': 30, 'initial_load': 0.7, 'max_speed': 5, 'scenario_type': 'default'}}
+            {'name': 'Stable Mobility', 'params': {'num_ues': NUM_UES, 'initial_load': 0.4, 'max_speed': 5, 'scenario_type': 'default'}},
+            {'name': 'Stable High Load', 'params': {'num_ues': NUM_UES, 'initial_load': 0.6, 'max_speed': 3, 'scenario_type': 'default'}}
         ]
 
         scenario_pbar = tqdm(scenarios_to_run, desc="Overall Progress", position=0)
