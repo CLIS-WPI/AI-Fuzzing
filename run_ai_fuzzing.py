@@ -2,17 +2,20 @@
 # AI-Driven Fuzzing Simulation for 5G Traffic Steering Algorithms
 # Optimized for H100 GPU and Multi-Objective Analysis
 #
-# This script improves upon the user's initial code by:
-# 1. Implementing a proper Multi-Objective Genetic Algorithm (NSGA-II)
-#    for the AI Fuzzer, as outlined in the paper's future work section.
-# 2. Enhancing the performance analysis module to generate professional-grade
-#    plots and comprehensive statistical summaries suitable for an IEEE conference paper.
-# 3. Incorporating H100-specific optimizations like mixed-precision and JIT compilation.
-# 4. Refactoring the simulation loop and data handling for robustness and clarity.
-# 5. Improving the `MLTrafficSteering` algorithm with an enhanced Q-learning model.
-
-# --- Imports ---
+# This script implements a batch-processing architecture to fully utilize
+# GPU resources, especially for the computationally intensive Sionna channel model
+# and the AI fuzzer's objective evaluation.
+#
+# Key Improvements:
+# - Reinstates the original, accurate Sionna channel model.
+# - Implements batch processing for the entire fuzzer population,
+#   running a single large GPU operation instead of many small ones.
+# - Ensures consistent tensor shapes for XLA compilation.
+# - Adds more descriptive comments for clarity.
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Force use of GPU 0
+# --- Imports ---
+
 import tensorflow as tf
 import numpy as np
 import pandas as pd
@@ -39,10 +42,10 @@ if physical_devices:
         "constant_folding": True,      # Optimize constant expressions
         "shape_optimization": True,    # Optimize based on tensor shapes
         "remapping": True,             # Remap operations for better performance
-        "arithmetic_optimization": True,  # Optimize arithmetic operations
-        "dependency_optimization": True,  # Optimize control dependencies
-        "loop_optimization": True,      # Optimize loops
-        "function_optimization": True,  # Optimize function calls
+        "arithmetic_optimization": True,   # Optimize arithmetic operations
+        "dependency_optimization": True,   # Optimize control dependencies
+        "loop_optimization": True,     # Optimize loops
+        "function_optimization": True,   # Optimize function calls
         "debug_stripper": True,        # Remove debug operations
     })
     
@@ -79,15 +82,15 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-SIMULATION_ITERATIONS = 20  # Increased from 50
-FUZZER_GENERATIONS = 25     # Increased from 15
-FUZZER_POPULATION = 200      # Increased for better GPU utilization
+SIMULATION_ITERATIONS = 20
+FUZZER_GENERATIONS = 25
+FUZZER_POPULATION = 10
 
 # Use NSGA-II for multi-objective optimization as described in the paper
 ENABLE_NSGA2_FUZZER = True
 
 ENABLE_TF_DEVICE_LOGGING = True
-SCRIPT_VERSION_NAME = "v26_final_optimized"
+SCRIPT_VERSION_NAME = "v27_final_batched_gpu"
 
 # --- Helper Functions ---
 def safe_nanpercentile(data, percentile):
@@ -105,17 +108,9 @@ def calculate_estimated_shannon_throughput_tf(sinr_linear_arr, bandwidth_hz):
     """
     Calculates the theoretical maximum throughput using the Shannon-Hartley theorem.
     This TensorFlow function is optimized for GPU acceleration on H100.
-    Uses enhanced XLA compilation and mixed precision for faster computation.
     """
-    # Cast to float32 for mixed precision benefits on H100
-    sinr_linear_arr = tf.cast(sinr_linear_arr, tf.float32)
-    bandwidth_hz = tf.cast(bandwidth_hz, tf.float32)
-    
-    # Use parallel operations where possible
     positive_sinr = tf.maximum(sinr_linear_arr, 1e-9)
-    log_term = tf.math.log(1 + positive_sinr)
-    log_2 = tf.math.log(tf.constant(2.0, dtype=tf.float32))
-    throughput_bps = bandwidth_hz * log_term / log_2
+    throughput_bps = tf.cast(bandwidth_hz, tf.float32) * tf.math.log(1 + positive_sinr) / tf.math.log(2.0)
     return throughput_bps
 
 def calculate_transmission_delay_ms(throughput_bps, packet_size_bytes=1500):
@@ -134,9 +129,8 @@ class NetworkEnvironment:
     Uses Sionna for accurate channel modeling and TensorFlow for GPU acceleration.
     """
     def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
-        # Use batch size of 1 for the main environment to avoid shape issues
-        # The AIFuzzer will handle batching for optimization
-        self.batch_size = 2048  # Use batch size of 1 for the environment
+        # Batch size is set here to accommodate the full fuzzer population.
+        self.batch_size = 128
         self.num_ues = num_ues
         
         if active_cell_indices is None:
@@ -167,15 +161,12 @@ class NetworkEnvironment:
         # Robust Resource Grid Configuration
         fft_size = 512
         num_tx = self.num_cells
-        total_streams = num_tx
-        num_effective_subcarriers = (256 // self.num_cells) * self.num_cells
-        num_guard_left = (fft_size - 1 - num_effective_subcarriers) // 2
-        num_guard_right = (fft_size - 1 - num_effective_subcarriers) - num_guard_left
+        num_effective_subcarriers = fft_size - 1 - (64 + 64)
         
         self.resource_grid = ResourceGrid(
             num_ofdm_symbols=14, fft_size=fft_size, subcarrier_spacing=30e3,
             num_tx=num_tx, num_streams_per_tx=1, cyclic_prefix_length=20,
-            pilot_pattern="empty", num_guard_carriers=(num_guard_left, num_guard_right), dc_null=False
+            pilot_pattern="empty", num_guard_carriers=(64, 64), dc_null=False
         )
 
         self.generate_h_freq_layer = GenerateOFDMChannel(
@@ -186,10 +177,10 @@ class NetworkEnvironment:
         
         all_bs_pos_2d = self._generate_hexagonal_layout(NUM_CELLS, inter_site_distance)
         self.bs_pos_2d = all_bs_pos_2d[self.active_cell_indices]
-        self.bs_loc = tf.constant(np.hstack([self.bs_pos_2d, np.ones((self.num_cells, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
+        # Use a single, unbatched tensor for BS location as it's constant per scenario
+        self.bs_loc_unbatched = tf.constant(np.hstack([self.bs_pos_2d, np.ones((self.num_cells, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
 
-        # Use fixed shape variables instead of dynamic shape to avoid XLA compilation issues
-        # Using self.batch_size instead of None for the shape to ensure tensor shapes are fully defined
+        # Variables for UE states will be batched
         self.ue_loc = tf.Variable(tf.zeros([self.batch_size, self.num_ues, 3], dtype=tf.float32), name="ue_loc")
         self.ue_velocities = tf.Variable(tf.zeros([self.batch_size, self.num_ues, 3], dtype=tf.float32), name="ue_velocities")
         self.ut_orientations = tf.zeros([self.batch_size, self.num_ues, 3], dtype=tf.float32)
@@ -251,19 +242,19 @@ class NetworkEnvironment:
         max_dist = np.max(np.linalg.norm(self.bs_pos_2d - [center_x, center_y], axis=1)) + 50
 
         ue_pos_2d_np = np.random.uniform(-max_dist, max_dist, size=(self.num_ues, 2)) + np.array([center_x, center_y])
-        
-        # Create arrays with explicit shapes for better XLA compatibility
-        # Match the batch size of the tensor variables
         ue_loc_array = np.hstack([ue_pos_2d_np, np.ones((self.num_ues, 1)) * 1.5])
-        # Repeat the same initial positions across all batch entries
-        ue_loc_batched = np.repeat(ue_loc_array.reshape(1, self.num_ues, 3), self.batch_size, axis=0).astype(np.float32)
+        
+        # We now batch the initial position for all fuzzer population members.
+        ue_loc_batched = np.repeat(ue_loc_array[np.newaxis, ...], self.batch_size, axis=0).astype(np.float32)
         self.ue_loc.assign(ue_loc_batched)
         
         ue_vel_2d_np = np.random.uniform(-max_speed, max_speed, size=(self.num_ues, 2))
         ue_vel_array = np.hstack([ue_vel_2d_np, np.zeros((self.num_ues, 1))])
-        # Repeat the same initial velocities across all batch entries
-        ue_vel_batched = np.repeat(ue_vel_array.reshape(1, self.num_ues, 3), self.batch_size, axis=0).astype(np.float32)
+        
+        # Batch the initial velocities as well.
+        ue_vel_batched = np.repeat(ue_vel_array[np.newaxis, ...], self.batch_size, axis=0).astype(np.float32)
         self.ue_velocities.assign(ue_vel_batched)
+        
         self.cell_loads = np.ones(self.num_cells) * initial_load
 
         if self.scenario_type == 'mixed':
@@ -283,202 +274,87 @@ class NetworkEnvironment:
         """Updates UE positions based on mobility model."""
         if max_speed is None: max_speed = self.max_speed_param
         
-        # Get a NumPy version of the mobility types for proper shape handling
+        # Create a batched version of the mobility mask
         mobile_mask_np = (self.ue_mobility_types == 'mobile').astype(np.float32)
-        mobile_mask = tf.constant(mobile_mask_np, dtype=tf.float32)
-        mobile_mask_3d = tf.reshape(mobile_mask, (1, self.num_ues, 1))
-
-        # Use the actual batch size from the object
-        velocity_shape = (self.batch_size, self.num_ues, 3)
-        
-        # Create batched version of the mobile mask
+        mobile_mask_3d = tf.reshape(tf.constant(mobile_mask_np, dtype=tf.float32), (1, self.num_ues, 1))
         mobile_mask_batched = tf.repeat(mobile_mask_3d, repeats=self.batch_size, axis=0)
         
-        # Generate velocity updates for all batches
+        velocity_shape = (self.batch_size, self.num_ues, 3)
         velocity_updates = tf.random.normal(shape=velocity_shape, stddev=1.0, dtype=tf.float32) * dt
         
-        # Get current velocity values
         current_velocities = self.ue_velocities
         new_velocities = current_velocities + (velocity_updates * mobile_mask_batched)
 
-        # Calculate speed and normalize
         speeds = tf.norm(new_velocities, axis=2, keepdims=True)
         safe_speeds = tf.where(speeds < 1e-9, tf.ones_like(speeds) * 1e-9, speeds)
         scale = tf.minimum(1.0, max_speed / safe_speeds)
         new_velocities = new_velocities * scale
-        new_velocities = new_velocities * mobile_mask_batched  # Use the batched mask
+        new_velocities = new_velocities * mobile_mask_batched
         
-        # Handle NaN or Inf values
-        new_velocities = tf.where(
-            tf.math.is_finite(new_velocities), 
-            new_velocities, 
-            tf.zeros_like(new_velocities)
-        )
-        
-        # Update velocity variable
+        new_velocities = tf.where(tf.math.is_finite(new_velocities), new_velocities, tf.zeros_like(new_velocities))
         self.ue_velocities.assign(new_velocities)
         
-        # Update positions based on velocity
         new_loc = self.ue_loc + new_velocities * dt
-        new_loc = tf.where(
-            tf.math.is_finite(new_loc), 
-            new_loc, 
-            self.ue_loc
-        )
+        new_loc = tf.where(tf.math.is_finite(new_loc), new_loc, self.ue_loc)
         
-        # Update position variable
         self.ue_loc.assign(new_loc)
     
-    # Enable XLA compilation for better GPU performance
     @tf.function(jit_compile=True, experimental_relax_shapes=True)
     def compute_metrics_tf(self, ue_loc_tf, bs_loc_tf, ut_orient_tf, bs_orient_tf, ut_vel_tf, in_state_tf):
         """
         TensorFlow-accelerated function to compute RSRP and SINR metrics.
-        Uses a simplified distance-based path loss model rather than Sionna's complex channel model
-        to avoid broadcasting errors.
-        
-        Optimized for H100 GPU with enhanced parallelization and tensor operations.
+        This function is now optimized to accept and process a batch of states.
         """
-        # Add a batch dimension if one doesn't exist to ensure consistent tensor ranks
-        if len(tf.shape(ue_loc_tf)) == 2:
-            # Use vectorized operations for batch creation
-            ue_loc_tf = tf.expand_dims(ue_loc_tf, axis=0)  # Add batch dim if missing
-            bs_loc_tf = tf.expand_dims(bs_loc_tf, axis=0)
-            
-        # Get static shapes where possible
-        static_shape_ue = ue_loc_tf.get_shape().as_list()
-        num_ues = static_shape_ue[1] if static_shape_ue[1] is not None else tf.shape(ue_loc_tf)[1]
+        # The Sionna channel model handles batching automatically when the batch size is part of the tensor shape.
+        self.channel_model_3gpp.set_topology(
+            ut_loc=ue_loc_tf, bs_loc=bs_loc_tf, ut_orientations=ut_orient_tf,
+            bs_orientations=bs_orient_tf, ut_velocities=ut_vel_tf, in_state=in_state_tf
+        )
         
-        static_shape_bs = bs_loc_tf.get_shape().as_list()
-        num_cells = static_shape_bs[1] if static_shape_bs[1] is not None else tf.shape(bs_loc_tf)[1]
-        
-        # Simple distance-based path loss model
-        ue_pos = ue_loc_tf[:, :, :2]  # [batch, num_ues, 2]
-        bs_pos = bs_loc_tf[:, :, :2]  # [batch, num_cells, 2]
-        
-        # Compute distances between each UE and each BS
-        ue_pos_expanded = tf.expand_dims(ue_pos, axis=2)  # [batch, num_ues, 1, 2]
-        bs_pos_expanded = tf.expand_dims(bs_pos, axis=1)  # [batch, 1, num_cells, 2]
-        distances = tf.sqrt(tf.reduce_sum(tf.square(ue_pos_expanded - bs_pos_expanded), axis=3))  # [batch, num_ues, num_cells]
-        
-        # Simple distance-based path loss model (in dB): PL = 128.1 + 37.6*log10(d) for d in km
-        distances_km = distances / 1000.0
-        path_loss_db = 128.1 + 37.6 * (tf.math.log(tf.maximum(distances_km, 0.001)) / tf.math.log(tf.constant(10.0, dtype=tf.float32)))
-        
-        # Add log-normal shadow fading with 8 dB standard deviation
-        shadow_std_dev = 8.0
-        random_shape = tf.shape(path_loss_db)
-        shadow_fading = tf.random.normal(random_shape, mean=0.0, stddev=shadow_std_dev, dtype=tf.float32)
-        
-        # Total path loss including shadowing
-        total_path_loss_db = path_loss_db + shadow_fading
-        
-        # Convert path loss to linear domain
-        path_loss_linear = tf.pow(10.0, -total_path_loss_db / 10.0)
-        
-        # Calculate received power
-        received_power_watts_tf = self.tx_power_watts_total * path_loss_linear  # [batch, num_ues, num_cells]
-        
-        # RSRP in dB
-        rsrp_db_tf = 10.0 * (tf.math.log(tf.maximum(received_power_watts_tf / 1e-3, 1e-20)) / tf.math.log(10.0))
-        
-        # Calculate SINR
-        signal_power_ue_cell = received_power_watts_tf
-        # Sum over all cells for each UE to get total received power (including interference)
-        total_power_at_ue_u = tf.reduce_sum(received_power_watts_tf, axis=2, keepdims=True)
+        h_freq = self.generate_h_freq_layer(batch_size=tf.shape(ue_loc_tf)[0])
+        h_freq_squeezed = tf.squeeze(h_freq, axis=[2, 4])
+        avg_channel_power_gain = tf.reduce_mean(tf.abs(h_freq_squeezed)**2, axis=[-2, -1])
+        received_power_watts_tf = self.tx_power_watts_total * avg_channel_power_gain
 
-        # Calculate interference for each UE-cell pair
+        # The subsequent calculations are vectorized to work on the entire batch
+        rp_ue_cell = received_power_watts_tf  # This is already batched
+        rsrp_db_tf = 10.0 * (tf.math.log(tf.maximum(rp_ue_cell / 1e-3, 1e-20)) / tf.math.log(10.0))
+
+        signal_power_ue_cell = rp_ue_cell
+        total_power_at_ue_u = tf.reduce_sum(rp_ue_cell, axis=2, keepdims=True)
         interference_ue_cell = total_power_at_ue_u - signal_power_ue_cell
-        
-        # Add noise power (thermal noise)
-        noise_power_watts = tf.cast(10**((NOISE_POWER_DBM_PER_HZ - 30) / 10) * BANDWIDTH, tf.float32)
-        noise_power = noise_power_watts * tf.ones_like(signal_power_ue_cell)
-        
-        # Calculate SINR
-        sinr_linear_tf = tf.math.divide_no_nan(signal_power_ue_cell, interference_ue_cell + noise_power)
+        noise_ue_cell = self.noise_power_watts * tf.ones_like(signal_power_ue_cell)
+
+        sinr_linear_tf = tf.math.divide_no_nan(signal_power_ue_cell, interference_ue_cell + noise_ue_cell)
         sinr_db_tf = 10.0 * (tf.math.log(tf.maximum(sinr_linear_tf, 1e-20)) / tf.math.log(10.0))
 
         # Clamp values for stability and realism
         rsrp_db_tf = tf.clip_by_value(rsrp_db_tf, -200.0, -40.0)
         sinr_db_tf = tf.clip_by_value(sinr_db_tf, -10.0, 30.0)
         
-        # Never conditionally remove the batch dimension - this avoids XLA shape mismatch errors
-        # Instead, always keep the batch dimension consistent and handle batch size 1 cases in the compute_metrics wrapper
-
         return rsrp_db_tf, sinr_db_tf
 
     def compute_metrics(self):
         """Wrapper to run the TensorFlow metric computation and return NumPy arrays."""
         try:
-            # Check for NaN or infinity issues in tensors without using tf.reduce_all directly
-            # This avoids the KeyboardInterrupt error from _numpy_internal
-            ue_loc_np = self.ue_loc.numpy()
-            bs_loc_np = self.bs_loc.numpy()
-            ue_vel_np = self.ue_velocities.numpy()
-            
-            if not (np.all(np.isfinite(ue_loc_np)) and 
-                   np.all(np.isfinite(bs_loc_np)) and 
-                   np.all(np.isfinite(ue_vel_np))):
+            if not np.all(np.isfinite(self.ue_loc.numpy())):
                 return (np.full((self.num_ues, self.num_cells), -200.0),
                         np.full((self.num_ues, self.num_cells), -30.0),
                         self.cell_loads.copy(), self.ue_priorities.copy())
             
-            rsrp_db_tf, sinr_db_tf = self.compute_metrics_tf(self.ue_loc, self.bs_loc, self.ut_orientations,
-                                                             self.bs_orientations, self.ue_velocities, self.in_state)
+            # The main simulation loop only needs one set of metrics, so we slice the first item from the batch.
+            rsrp_db_tf, sinr_db_tf = self.compute_metrics_tf(
+                self.ue_loc[:1], 
+                self.bs_loc_unbatched, 
+                self.ut_orientations[:1],
+                self.bs_orientations[:1], 
+                self.ue_velocities[:1], 
+                self.in_state[:1])
             
-            # Convert to numpy and handle batch dimension
-            rsrp_np = rsrp_db_tf.numpy()
-            sinr_np = sinr_db_tf.numpy()
+            rsrp_np = rsrp_db_tf.numpy()[0]
+            sinr_np = sinr_db_tf.numpy()[0]
             
-            # Remove batch dimension if present
-            if len(rsrp_np.shape) == 3:
-                rsrp_np = rsrp_np[0]
-                sinr_np = sinr_np[0]
-            
-            # Ensure the arrays have the expected dimensions
-            expected_shape = (self.num_ues, self.num_cells)
-            
-            # Fix RSRP shape if needed
-            if rsrp_np.shape != expected_shape:
-                print(f"Warning: RSRP shape mismatch. Got {rsrp_np.shape}, expected {expected_shape}")
-                fixed_rsrp = np.full(expected_shape, -200.0)
-                # Copy as much as possible from the original array
-                r_rows = min(rsrp_np.shape[0], expected_shape[0])
-                r_cols = min(rsrp_np.shape[1], expected_shape[1])
-                fixed_rsrp[:r_rows, :r_cols] = rsrp_np[:r_rows, :r_cols]
-                rsrp_np = fixed_rsrp
-                
-            # Fix SINR shape if needed
-            if sinr_np.shape != expected_shape:
-                print(f"Warning: SINR shape mismatch. Got {sinr_np.shape}, expected {expected_shape}")
-                fixed_sinr = np.full(expected_shape, -30.0)
-                # Copy as much as possible from the original array
-                s_rows = min(sinr_np.shape[0], expected_shape[0])
-                s_cols = min(sinr_np.shape[1], expected_shape[1])
-                fixed_sinr[:s_rows, :s_cols] = sinr_np[:s_rows, :s_cols]
-                sinr_np = fixed_sinr
-            
-            # Ensure cell_loads has the correct length
-            if len(self.cell_loads) != self.num_cells:
-                print(f"Warning: cell_loads length mismatch. Got {len(self.cell_loads)}, expected {self.num_cells}")
-                fixed_loads = np.ones(self.num_cells) * 0.5  # Default load of 50%
-                copy_len = min(len(self.cell_loads), self.num_cells)
-                fixed_loads[:copy_len] = self.cell_loads[:copy_len]
-                cell_loads = fixed_loads
-            else:
-                cell_loads = self.cell_loads.copy()
-                
-            # Ensure priorities has the correct length
-            if len(self.ue_priorities) != self.num_ues:
-                print(f"Warning: priorities length mismatch. Got {len(self.ue_priorities)}, expected {self.num_ues}")
-                fixed_priorities = np.ones(self.num_ues, dtype=int) * 3  # Default priority (lowest)
-                copy_len = min(len(self.ue_priorities), self.num_ues)
-                fixed_priorities[:copy_len] = self.ue_priorities[:copy_len]
-                priorities = fixed_priorities
-            else:
-                priorities = self.ue_priorities.copy()
-            
-            return rsrp_np, sinr_np, cell_loads, priorities
+            return rsrp_np, sinr_np, self.cell_loads.copy(), self.ue_priorities.copy()
         except Exception as e:
             print(f"General Uncaught Error during Sionna UMi metric computation: {e}")
             return (np.full((self.num_ues, self.num_cells), -200.0),
@@ -506,18 +382,7 @@ class TrafficSteeringAlgorithm:
 
     def assign_initial(self, rsrp):
         """Initial assignment based on best RSRP."""
-        # Ensure rsrp has valid dimensions
-        if rsrp.shape[0] < self.num_ues or rsrp.shape[1] < self.num_cells:
-            print(f"Warning: RSRP shape for initial assignment is {rsrp.shape}, expected at least ({self.num_ues},{self.num_cells})")
-            # Handle the case where rsrp dimensions are smaller than expected
-            actual_num_ues = min(rsrp.shape[0], self.num_ues)
-            assignments = np.zeros(self.num_ues, dtype=int)
-            assignments[:actual_num_ues] = np.argmax(rsrp[:actual_num_ues], axis=1)
-            self.prev_assignments = assignments
-        else:
-            self.prev_assignments = np.argmax(rsrp, axis=1)
-            # Ensure assignments are valid cell indices
-            self.prev_assignments = np.clip(self.prev_assignments, 0, self.num_cells - 1)
+        self.prev_assignments = np.clip(np.argmax(rsrp, axis=1), 0, self.num_cells - 1)
         return self.prev_assignments.copy()
 
     def assign_ues(self, rsrp, sinr, cell_loads, priorities, dt=1.0):
@@ -534,7 +399,6 @@ class BaselineA3(TrafficSteeringAlgorithm):
         self.hysteresis = hysteresis
         self.ttt = ttt
         self.load_threshold = load_threshold
-        # Ensure that the timer dimensions are valid
         self.num_ues = max(1, num_ues)
         self.num_cells = max(1, num_cells)
         self.ttt_timers = np.zeros((self.num_ues, self.num_cells))
@@ -544,67 +408,35 @@ class BaselineA3(TrafficSteeringAlgorithm):
         if self.prev_assignments is None:
             return self.assign_initial(rsrp)
             
-        # Ensure that array shapes match expectations to avoid index errors
         if rsrp.shape[0] != self.num_ues or rsrp.shape[1] != self.num_cells:
-            print(f"Warning: RSRP shape mismatch. Expected ({self.num_ues},{self.num_cells}), got {rsrp.shape}")
-            # Clip to valid dimensions if needed
-            actual_num_ues = min(rsrp.shape[0], self.num_ues)
-            actual_num_cells = min(rsrp.shape[1], self.num_cells)
-        else:
-            actual_num_ues = self.num_ues
-            actual_num_cells = self.num_cells
+            return self.prev_assignments
             
-        # Make sure prev_assignments has valid indices
-        assignments = np.clip(self.prev_assignments.copy(), 0, actual_num_cells - 1)
+        assignments = np.clip(self.prev_assignments.copy(), 0, self.num_cells - 1)
         
-        for ue_idx in range(actual_num_ues):
+        # Use vectorized operations to improve CPU performance
+        serving_rsrp = rsrp[np.arange(self.num_ues), assignments]
+        
+        # Condition to increment timers
+        cond_increment = (rsrp > serving_rsrp[:, np.newaxis] + self.hysteresis)
+        self.ttt_timers = np.where(cond_increment, self.ttt_timers + dt, 0)
+        
+        potential_targets = np.full(self.num_ues, -1, dtype=int)
+        
+        for ue_idx in range(self.num_ues):
             serving_cell = assignments[ue_idx]
-            # Ensure serving_cell is a valid index
-            if serving_cell >= actual_num_cells:
-                serving_cell = 0
-                assignments[ue_idx] = 0
-                
-            serving_rsrp = rsrp[ue_idx, serving_cell]
             
-            # Reset timers for cells no longer meeting conditions
-            # Make sure we don't exceed array bounds
-            timer_update = np.zeros(self.ttt_timers.shape[1])
-            for c in range(min(actual_num_cells, self.ttt_timers.shape[1])):
-                if ue_idx < self.ttt_timers.shape[0]:
-                    if rsrp[ue_idx, c] > serving_rsrp + self.hysteresis:
-                        timer_update[c] = self.ttt_timers[ue_idx, c] + dt
+            # Find all cells meeting all conditions
+            candidate_cells = np.where(
+                (rsrp[ue_idx, :] > serving_rsrp[ue_idx] + self.hysteresis) &
+                (cell_loads < self.load_threshold) &
+                (self.ttt_timers[ue_idx, :] >= self.ttt)
+            )[0]
             
-            if ue_idx < self.ttt_timers.shape[0]:
-                self.ttt_timers[ue_idx, :] = timer_update
-                                                
-            potential_target = -1
-            max_rsrp_improvement = 0
-            
-            for cell_idx in range(actual_num_cells):
-                if cell_idx == serving_cell: continue
-                
-                # Ensure indices are valid for all arrays
-                if ue_idx >= rsrp.shape[0] or cell_idx >= rsrp.shape[1] or cell_idx >= cell_loads.shape[0]:
-                    continue
-                
-                neighbor_rsrp = rsrp[ue_idx, cell_idx]
-                
-                a3_cond = neighbor_rsrp > serving_rsrp + self.hysteresis
-                load_cond = cell_loads[cell_idx] < self.load_threshold
-                
-                # Only check ttt_timers if indices are valid
-                if ue_idx < self.ttt_timers.shape[0] and cell_idx < self.ttt_timers.shape[1]:
-                    timer_cond = self.ttt_timers[ue_idx, cell_idx] >= self.ttt
-                else:
-                    timer_cond = True  # Skip timer check if indices are invalid
-                
-                if a3_cond and load_cond and timer_cond:
-                    if (neighbor_rsrp - serving_rsrp) > max_rsrp_improvement:
-                        max_rsrp_improvement = neighbor_rsrp - serving_rsrp
-                        potential_target = cell_idx
-            
-            if potential_target != -1:
-                assignments[ue_idx] = potential_target
+            if candidate_cells.size > 0:
+                # Find the best candidate based on RSRP
+                best_candidate = candidate_cells[np.argmax(rsrp[ue_idx, candidate_cells])]
+                if best_candidate != serving_cell:
+                    assignments[ue_idx] = best_candidate
         
         self.prev_assignments = assignments
         return assignments
@@ -614,19 +446,26 @@ class UtilityBased(TrafficSteeringAlgorithm):
     Utility-based algorithm as described in the paper.
     """
     def assign_ues(self, rsrp, sinr, cell_loads, priorities, dt=1.0):
+        if rsrp.shape[0] != self.num_ues or rsrp.shape[1] != self.num_cells:
+            if self.prev_assignments is None:
+                self.prev_assignments = np.zeros(self.num_ues, dtype=int)
+            return self.prev_assignments
+
         assignments = np.zeros(self.num_ues, dtype=int)
-        for ue_idx in range(self.num_ues):
-            # Normalizing factors to handle different scales of metrics
-            sinr_w, load_w, prio_w = 0.5, 0.3, 0.2
-            
-            # Use vectorized operations for efficiency
-            sinr_c = sinr_w * np.clip(sinr[ue_idx, :], -20, 30)
-            load_c = load_w * (1.0 - cell_loads) * 20
-            prio_c = prio_w * (4.0 - float(priorities[ue_idx])) * 10
-            
-            utilities = sinr_c + load_c + prio_c
-            assignments[ue_idx] = np.argmax(utilities)
-            
+        # Use vectorized operations to avoid Python for-loops
+        sinr_w, load_w, prio_w = 0.5, 0.3, 0.2
+        
+        sinr_c = sinr_w * np.clip(sinr, -20, 30)
+        load_c = load_w * (1.0 - cell_loads) * 20
+        prio_c = prio_w * (4.0 - priorities) * 10
+        
+        # Reshape for broadcasting
+        load_c_reshaped = np.tile(load_c, (self.num_ues, 1))
+        prio_c_reshaped = np.tile(prio_c[:, np.newaxis], (1, self.num_cells))
+        
+        utilities = sinr_c + load_c_reshaped + prio_c_reshaped
+        assignments = np.argmax(utilities, axis=1)
+        
         self.prev_assignments = assignments
         return assignments
 
@@ -651,13 +490,12 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
         self.step_count = 0
         
     def _get_state(self, ue_idx, rsrp, sinr, cell_loads):
-        current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None else 0
-        current_sinr = sinr[ue_idx, current_cell] if 0 <= current_cell < self.num_cells else -30
+        current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None and len(self.prev_assignments) > ue_idx else 0
+        current_sinr = sinr[ue_idx, current_cell] if 0 <= current_cell < self.num_cells and ue_idx < sinr.shape[0] else -30
         avg_load = np.mean(cell_loads)
         max_neighbor_sinr = np.max([sinr[ue_idx, i] for i in range(self.num_cells) if i != current_cell])
         load_imbalance = np.std(cell_loads)
         
-        # Discretize state with finer bins
         state = (
             min(20, max(-20, int(current_sinr // 2))),
             min(20, int(avg_load * 20)),
@@ -668,7 +506,6 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
         return state
     
     def _calculate_reward(self, ue_idx, new_sinr, old_sinr, handover_occurred, priority, cell_loads):
-        """Enhanced reward function with normalization and penalty for handovers."""
         new_sinr_norm = (new_sinr + 30) / 60.0
         old_sinr_norm = (old_sinr + 30) / 60.0
         
@@ -686,7 +523,7 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
             else:
                 handover_penalty = -3.0
         
-        current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None else 0
+        current_cell = self.prev_assignments[ue_idx] if self.prev_assignments is not None and len(self.prev_assignments) > ue_idx else 0
         current_load = cell_loads[current_cell] if 0 <= current_cell < len(cell_loads) else 0.5
         load_reward = -2.0 * current_load
         
@@ -699,14 +536,12 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
         return total_reward
         
     def _add_experience(self, ue_idx, state, action, reward, next_state, done=False):
-        """Adds an experience tuple to the replay buffer."""
         experience = (ue_idx, state, action, reward, next_state, done)
         self.experience_buffer.append(experience)
         if len(self.experience_buffer) > self.buffer_size:
             self.experience_buffer.pop(0)
     
     def _replay_experience(self):
-        """Performs a mini-batch update from the experience replay buffer."""
         if len(self.experience_buffer) < self.batch_size:
             return
             
@@ -722,7 +557,6 @@ class MLTrafficSteering(TrafficSteeringAlgorithm):
             self.q_table[state][action] = current_q + self.learning_rate * (target_q - current_q)
     
     def _update_learning_params(self):
-        """Adapts learning parameters over time."""
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
     
@@ -802,12 +636,9 @@ class AIFuzzer:
         self.input_vector_size = env.num_cells + env.num_ues * 2
         self.objective_call_count = 0
         self.use_nsga2 = use_nsga2
-        self.num_objectives = 5  # handovers, qoe_violations, unfairness, energy, vulnerability_potential
+        self.num_objectives = 4 # handovers, qoe_violations, unfairness, energy
         self.pareto_archive = []
         self.vulnerability_memory = []
-        self.adaptation_rate = 0.05  # Rate for adaptive mutation
-        self.stagnation_counter = 0  # Track generations without improvement
-        self.prev_best_obj_sum = 0.0  # Track previous best objective sum
 
     def _calculate_jain_fairness(self, allocations):
         """Calculates Jain's Fairness Index."""
@@ -820,90 +651,88 @@ class AIFuzzer:
         return sum_val**2 / (len(allocations_cleaned) * sum_sq_val)
 
     def _calculate_objectives(self, inputs, current_assignments, dt_fitness=1.0):
-        """Calculates the multi-objective values for a given set of fuzzer inputs.
-        Optimized for H100 GPU with batch processing."""
+        """
+        Calculates the four vulnerability objectives for a given batch of fuzzer inputs.
+        This method is now optimized for GPU batch processing.
+        """
         self.objective_call_count += 1
-        # Convert all inputs to a single tensor
-        inputs_tf = tf.convert_to_tensor(inputs, dtype=tf.float32)
-        load_modifiers = inputs_tf[:, :self.env.num_cells]
-        position_modifiers_2d = tf.reshape(inputs_tf[:, self.env.num_cells:], [-1, self.env.num_ues, 2])
-        position_modifiers_3d = tf.concat([
-            position_modifiers_2d,
-            tf.zeros([tf.shape(inputs_tf)[0], self.env.num_ues, 1], dtype=tf.float32)
-        ], axis=2)
+        
+        batch_size = inputs.shape[0]
+        load_modifiers = inputs[:, :self.env.num_cells]
+        position_modifiers_2d = inputs[:, self.env.num_cells:].reshape(batch_size, self.env.num_ues, 2)
+        position_modifiers_3d = np.concatenate([position_modifiers_2d, np.zeros((batch_size, self.env.num_ues, 1))], axis=2)
+        position_modifiers_tf = tf.constant(position_modifiers_3d, dtype=tf.float32)
 
-        # Save original state
-        original_ue_loc = tf.identity(self.env.ue_loc)
-        original_cell_loads = tf.convert_to_tensor(self.env.cell_loads, dtype=tf.float32)
+        # --- شروع اصلاحات ---
+        # 1. حالت کامل اولیه را قبل از هر کاری ذخیره کن
+        full_original_ue_loc = self.env.ue_loc.read_value() 
+        original_cell_loads = self.env.cell_loads.copy()
         original_ts_prev_assignments = self.ts.prev_assignments.copy() if self.ts.prev_assignments is not None else None
+        
+        # حالا فقط یک سطر از آن را برای تکثیر در فازر استفاده کن
+        base_ue_loc_for_fuzzing = full_original_ue_loc[:1]
+        
+        # Replicate initial state for each batch item
+        base_ue_loc = tf.tile(base_ue_loc_for_fuzzing, [batch_size, 1, 1])
+        # --- پایان اصلاحات اولیه ---
 
-        batch_size = tf.shape(inputs_tf)[0]
+        temp_loads_batch = np.clip(np.tile(original_cell_loads, (batch_size, 1)) + load_modifiers, 0, 1)
+        
+        # Apply fuzzing perturbations to create a new batch of UE locations
+        fuzzed_ue_loc_batch = base_ue_loc + position_modifiers_tf
+        
+        # Use a single call to compute metrics for the entire batch
+        rsrp_batch, sinr_batch = self.env.compute_metrics_tf(
+            fuzzed_ue_loc_batch,
+            tf.tile(self.env.bs_loc_unbatched, [batch_size, 1, 1]),
+            tf.tile(self.env.ut_orientations[:1], [batch_size, 1, 1]),
+            tf.tile(self.env.bs_orientations[:1], [batch_size, 1, 1]),
+            tf.tile(self.env.ue_velocities[:1], [batch_size, 1, 1]),
+            tf.tile(self.env.in_state[:1], [batch_size, 1])
+        )
+
         results = []
-
-        # Vectorized processing for all individuals in the population
         for i in range(batch_size):
-            # Apply the i-th load and position modifier
-            position_mod = position_modifiers_3d[i]
-            self.env.ue_loc.assign(original_ue_loc + tf.expand_dims(position_mod, 0))
-            self.env.cell_loads = tf.clip_by_value(original_cell_loads + load_modifiers[i], 0, 1).numpy()
+            rsrp = rsrp_batch.numpy()[i]
+            sinr = sinr_batch.numpy()[i]
+            priorities = self.env.ue_priorities.copy()
+            
+            # --- شروع اصلاحات ---
+            # 2. از خود `current_assignments` (که یک آرایه است) استفاده کن و آن را ایندکس نزن
+            self.ts.prev_assignments = current_assignments 
+            # --- پایان اصلاحات ---
 
-            # Compute metrics (must be adapted to support batch if possible)
-            rsrp, sinr, cell_loads_eval, priorities_eval = self.env.compute_metrics()
-
-            self.ts.prev_assignments = current_assignments
-            new_assignments = self.ts.assign_ues(rsrp, sinr, self.env.cell_loads, priorities_eval, dt=dt_fitness)
+            new_assignments = self.ts.assign_ues(rsrp, sinr, temp_loads_batch[i], priorities, dt_fitness)
             new_assignments = np.clip(new_assignments, 0, self.env.num_cells - 1)
 
             objectives = {}
             num_handovers = np.sum(new_assignments != self.ts.prev_assignments)
             objectives['handovers'] = num_handovers / max(1, self.env.num_ues)
-
-            high_prio_mask = (priorities_eval == 1)
+            
+            high_prio_mask = (priorities == 1)
             high_prio_ues = np.sum(high_prio_mask)
             qoe_violations = 0.0
             if high_prio_ues > 0:
-                assigned_sinr_hp_ues = []
-                for j in range(min(self.env.num_ues, sinr.shape[0])):
-                    if j < len(high_prio_mask) and j < len(new_assignments) and high_prio_mask[j]:
-                        cell_idx = new_assignments[j]
-                        if 0 <= cell_idx < sinr.shape[1]:
-                            assigned_sinr_hp_ues.append(sinr[j, cell_idx])
-                        else:
-                            assigned_sinr_hp_ues.append(0.0)
-                if assigned_sinr_hp_ues:
-                    qoe_violations = np.sum(np.array(assigned_sinr_hp_ues) < 5.0)
+                assigned_sinr_hp_ues = [sinr[j, new_assignments[j]] for j in range(self.env.num_ues) if high_prio_mask[j]]
+                qoe_violations = np.sum(np.array(assigned_sinr_hp_ues) < 5.0)
             objectives['qoe_violation'] = qoe_violations / high_prio_ues if high_prio_ues > 0 else 0.0
-
-            assigned_sinr_list = []
-            for j in range(min(self.env.num_ues, sinr.shape[0])):
-                if j < len(new_assignments):
-                    cell_idx = new_assignments[j]
-                    if 0 <= cell_idx < sinr.shape[1]:
-                        assigned_sinr_list.append(sinr[j, cell_idx])
-                    else:
-                        assigned_sinr_list.append(0.0)
-                else:
-                    assigned_sinr_list.append(0.0)
-
-            assigned_sinr_np = np.array(assigned_sinr_list)
+            
+            assigned_sinr_np = np.array([sinr[j, new_assignments[j]] for j in range(self.env.num_ues)])
             assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
             jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
             objectives['unfairness'] = 1.0 - jain_score
             objectives['energy_consumption'] = num_handovers / max(1, self.env.num_ues)
+            
+            results.append([objectives['handovers'], objectives['qoe_violation'], objectives['unfairness'], objectives['energy_consumption']])
 
-            temp_oracle = Oracle(num_ues=self.env.num_ues, num_cells=self.env.num_cells)
-            oracle_result = temp_oracle.evaluate(rsrp, sinr, new_assignments, cell_loads_eval, priorities_eval, current_assignments)
-            vulnerability_score = oracle_result.get('vulnerability_score', 0)
-            objectives['vulnerability_potential'] = vulnerability_score / 10.0
-
-            results.append([objectives['handovers'], objectives['qoe_violation'], objectives['unfairness'],
-                            objectives['energy_consumption'], objectives['vulnerability_potential']])
-
-        # Restore original state
-        self.env.ue_loc.assign(original_ue_loc)
-        self.env.cell_loads = original_cell_loads.numpy()
+        # --- شروع اصلاحات ---
+        # 3. حالت کامل و اولیه را به متغیرها برگردان
+        self.env.ue_loc.assign(full_original_ue_loc)
+        # --- پایان اصلاحات ---
+        
+        self.env.cell_loads = original_cell_loads
         self.ts.prev_assignments = original_ts_prev_assignments
-
+        
         return results
 
     def _dominates(self, obj1, obj2):
@@ -913,20 +742,14 @@ class AIFuzzer:
         return better_or_equal and strictly_better
     
     def _fast_non_dominated_sort(self, objectives_list):
-        """NSGA-II Fast Non-dominated Sorting algorithm (TensorFlow vectorized version stub)."""
-        # Convert objectives_list to tensor
-        objectives_tf = tf.convert_to_tensor(objectives_list, dtype=tf.float32)
-        pop_size = tf.shape(objectives_tf)[0]
-        # Placeholder for vectorized implementation
-        # TODO: Implement full vectorized domination checks using TensorFlow ops
-        # For now, fallback to original CPU implementation for correctness
-        # --- Begin original CPU implementation ---
-        pop_size_cpu = len(objectives_list)
+        """NSGA-II Fast Non-dominated Sorting algorithm."""
+        pop_size = len(objectives_list)
         fronts = [[]]
-        dominated_count = [0] * pop_size_cpu
-        dominated_solutions = [[] for _ in range(pop_size_cpu)]
-        for i in range(pop_size_cpu):
-            for j in range(pop_size_cpu):
+        dominated_count = [0] * pop_size
+        dominated_solutions = [[] for _ in range(pop_size)]
+        
+        for i in range(pop_size):
+            for j in range(pop_size):
                 if i != j:
                     if self._dominates(objectives_list[i], objectives_list[j]):
                         dominated_solutions[i].append(j)
@@ -934,6 +757,7 @@ class AIFuzzer:
                         dominated_count[i] += 1
             if dominated_count[i] == 0:
                 fronts[0].append(i)
+        
         current_front = 0
         while len(fronts[current_front]) > 0:
             next_front = []
@@ -944,35 +768,32 @@ class AIFuzzer:
                         next_front.append(j)
             current_front += 1
             fronts.append(next_front)
+        
         if not fronts[-1]: fronts.pop()
         return fronts
-        # --- End original CPU implementation ---
     
     def _calculate_crowding_distance(self, objectives_list, front_indices):
-        """Calculates crowding distance for diversity preservation (TensorFlow vectorized version stub)."""
-        # Convert objectives_list to tensor
-        objectives_tf = tf.convert_to_tensor(objectives_list, dtype=tf.float32)
-        front_indices_tf = tf.convert_to_tensor(front_indices, dtype=tf.int32)
-        # Placeholder for vectorized implementation
-        # TODO: Implement full vectorized crowding distance using TensorFlow ops
-        # For now, fallback to original CPU implementation for correctness
-        # --- Begin original CPU implementation ---
+        """Calculates crowding distance for diversity preservation."""
         if len(front_indices) <= 2: return [float('inf')] * len(front_indices)
+        
         distances = [0.0] * len(front_indices)
         front_objectives = [objectives_list[i] for i in front_indices]
         num_objectives = len(front_objectives[0])
+        
         for obj_idx in range(num_objectives):
             sorted_indices = sorted(range(len(front_indices)), key=lambda i: front_objectives[i][obj_idx])
             sorted_front = [front_indices[i] for i in sorted_indices]
+            
             distances[sorted_indices[0]] = float('inf')
             distances[sorted_indices[-1]] = float('inf')
+            
             obj_range = objectives_list[sorted_front[-1]][obj_idx] - objectives_list[sorted_front[0]][obj_idx]
             if obj_range > 0:
                 for i in range(1, len(sorted_front) - 1):
                     distances[sorted_indices[i]] += (objectives_list[sorted_front[i+1]][obj_idx] - 
                                                      objectives_list[sorted_front[i-1]][obj_idx]) / obj_range
+        
         return distances
-        # --- End original CPU implementation ---
 
     def _tournament_selection(self, population, objectives_vectors, fronts):
         """Selects individuals using tournament selection based on rank and crowding distance."""
@@ -1077,50 +898,26 @@ class AIFuzzer:
                 child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
                 
                 for child in [child1, child2]:
-                    # Increased mutation probability from 0.2 to 0.35
-                    if np.random.rand() < 0.35:
-                        # Adaptive mutation: higher mutation rate for stagnating populations
-                        mutation_influence = 0.4  # Increased from 0.3 for more exploration
+                    if np.random.rand() < 0.2:
+                        mutation_influence = 0.3
                         if len(self.vulnerability_memory) > 0:
-                            # Prefer more severe vulnerabilities from memory
-                            # Using a simple uniform selection as fallback
                             memory_pattern = np.random.choice(self.vulnerability_memory)
                             child = (1 - mutation_influence) * child + mutation_influence * memory_pattern['individual']
                         
-                        # Different mutation rates for different parts of the genome
-                        # Increased variance for cell loads to explore more extreme scenarios
-                        child[:self.env.num_cells] += np.random.normal(0, 0.15, self.env.num_cells)
-                        # Improved exploration of UE positions and velocities
-                        child[self.env.num_cells:] += np.random.normal(0, 2.5, self.env.num_ues * 2)
-                        child[:self.env.num_cells] = np.clip(child[:self.env.num_cells], -0.4, 0.4)  # Wider range
+                        child[:self.env.num_cells] += np.random.normal(0, 0.08, self.env.num_cells)
+                        child[self.env.num_cells:] += np.random.normal(0, 2.0, self.env.num_ues * 2)
+                        child[:self.env.num_cells] = np.clip(child[:self.env.num_cells], -0.3, 0.3)
                     offspring.append(child)
             
             population = offspring[:self.population_size]
             
             avg_objectives = np.mean(objectives_vectors, axis=0)
-            # Check for stagnation to trigger adaptive mutation
-            if gen > 0:
-                prev_best = np.max([np.sum(obj) for obj in objectives_vectors])
-                if prev_best <= self.prev_best_obj_sum:
-                    self.stagnation_counter += 1
-                else:
-                    self.stagnation_counter = 0
-                self.prev_best_obj_sum = prev_best
-                
-            vulnerability_count = len([obj for obj in objectives_vectors if np.sum(obj) > 1.5])  # More strict threshold
-            status_dict = {
-                'HO': f'{avg_objectives[0]:.2f}', 
-                'QoE': f'{avg_objectives[1]:.2f}',
-                'UF': f'{avg_objectives[2]:.2f}', 
-                'EN': f'{avg_objectives[3]:.2f}'
-            }
-            
-            # Only add vulnerability index if available (for backwards compatibility)
-            if len(avg_objectives) > 4:
-                status_dict['Vuln'] = f'{avg_objectives[4]:.2f}'
-                
-            status_dict['Vulns'] = vulnerability_count
-            pbar_gen.set_postfix(status_dict)
+            vulnerability_count = len([obj for obj in objectives_vectors if np.sum(obj) > 1.0])
+            pbar_gen.set_postfix({
+                'HO': f'{avg_objectives[0]:.2f}', 'QoE': f'{avg_objectives[1]:.2f}',
+                'UF': f'{avg_objectives[2]:.2f}', 'EN': f'{avg_objectives[3]:.2f}',
+                'Vulns': vulnerability_count
+            })
             
         pbar_gen.close()
         return best_overall_individual
@@ -1182,53 +979,37 @@ class Oracle:
                 if changes >= self.ping_pong_threshold:
                     num_ping_pongs_detected_this_step += 1
                     
-        # Enhanced ping-pong detection with severity scoring
-        ping_pong_severity = 0
         if num_ping_pongs_detected_this_step >= self.ping_pong_threshold:
-            ping_pong_ratio = num_ping_pongs_detected_this_step / self.num_ues
-            ping_pong_severity = min(3, 1 + int(ping_pong_ratio * 5))  # Scale severity from 1-3 based on ratio
-            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating (Severity: {ping_pong_severity})")
+            vulnerabilities_found.append(f"Ping-Pong: {num_ping_pongs_detected_this_step} UEs oscillating")
 
         temp_assigned_sinr_list = [sinr[i, assignments[i]] if 0 <= assignments[i] < self.num_cells else np.nan for i in range(self.num_ues)]
         assigned_sinr_np_finite = np.array([s for s in temp_assigned_sinr_list if pd.notna(s)])
         
-        # Improved high-priority user QoE analysis
         high_priority_mask = (priorities == 1)
         assigned_sinr_hp_ues_list = [sinr[i, assignments[i]] for i in range(self.num_ues) if high_priority_mask[i]]
         assigned_sinr_hp_ues_np = np.array(assigned_sinr_hp_ues_list) if assigned_sinr_hp_ues_list else np.array([])
         
-        qoe_violation_severity = 0
         has_qoe_violation = False
         if assigned_sinr_hp_ues_np.size > 0:
             avg_sinr_high = np.mean(assigned_sinr_hp_ues_np)
             if avg_sinr_high < self.qos_sinr_threshold:
-                qoe_deficit = self.qos_sinr_threshold - avg_sinr_high
-                qoe_violation_severity = min(3, 1 + int(qoe_deficit / 2))  # Scale severity 1-3 based on how far below threshold
-                vulnerabilities_found.append(f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB (Severity: {qoe_violation_severity})")
+                vulnerabilities_found.append(f"QoS Violation: Avg High Prio SINR = {avg_sinr_high:.2f} dB")
                 has_qoe_violation = True
 
         jain_score = 1.0
-        unfairness_severity = 0
         has_unfairness = False
         if assigned_sinr_np_finite.size > 0:
             assigned_sinr_linear = 10**(assigned_sinr_np_finite / 10.0)
             jain_score = self._jain_fairness(assigned_sinr_linear)
             if jain_score < self.fairness_threshold:
-                fairness_deficit = self.fairness_threshold - jain_score
-                unfairness_severity = min(3, 1 + int(fairness_deficit / 0.2))  # Scale severity 1-3
-                vulnerabilities_found.append(f"Unfairness: Jain Index = {jain_score:.2f} (Severity: {unfairness_severity})")
+                vulnerabilities_found.append(f"Unfairness: Jain Index = {jain_score:.2f}")
                 has_unfairness = True
         
         # Calculate additional metrics for later analysis
         handover_rate = np.sum(assignments != prev_assignments) / self.num_ues if prev_assignments is not None else 0
         
-        # Combined vulnerability severity score (1-10 scale)
-        total_vulnerability_score = ping_pong_severity*2 + qoe_violation_severity*3 + unfairness_severity*2
-        
         return {
             'vulnerabilities': vulnerabilities_found,
-            'vulnerability_score': total_vulnerability_score,  # New severity score
-            'severity': total_vulnerability_score,  # Add this for backward compatibility
             'jain_index': jain_score,
             'avg_sinr_db': np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan,
             'sinr_5th_percentile_db': safe_nanpercentile(assigned_sinr_np_finite, 5),
@@ -1243,19 +1024,6 @@ class Oracle:
 def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_type, active_cell_indices=None, inter_site_distance=100.0):
     print(f"\n--- Running Scenario: {scenario_name} ---")
     
-    # Configure TensorFlow memory growth for optimal H100 utilization
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        print(f"Using {len(gpus)} GPU(s) for scenario: {scenario_name}")
-        # Let TensorFlow allocate memory as needed for H100
-        try:
-            # This allows TensorFlow to use most GPU memory but still grow as needed
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-        except RuntimeError as e:
-            print(f"Error configuring GPU memory growth: {e}")
-    
-    # Create the environment with optimized parameters
     shared_env_state = NetworkEnvironment(
         num_ues=num_ues, initial_load=initial_load, scenario_max_speed=max_speed,
         scenario_type=scenario_type, active_cell_indices=active_cell_indices,
@@ -1310,7 +1078,6 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                     if hasattr(fuzzer, 'generate_inputs'):
                         fuzzed_inputs = fuzzer.generate_inputs(dt=1.0)
                     else:
-                        # For RandomFuzzer, we don't need to call a sub-method
                         load_modifier = np.random.uniform(-0.05, 0.05, shared_env_state.num_cells)
                         position_modifier_2d = np.random.uniform(-3, 3, (num_ues, 2))
                         fuzzed_inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
@@ -1357,9 +1124,7 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                         'has_unfairness': oracle_metrics['has_unfairness']
                     })
                     
-                    # Update fuzzer effectiveness metrics
                     fuzzer_effectiveness[fuzzer_name]['vulnerability_counts'].append(len(oracle_metrics['vulnerabilities']))
-                    # Use severity from oracle_metrics if available, otherwise use the old calculation
                     if 'severity' in oracle_metrics:
                         fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(oracle_metrics['severity'])
                     else:
@@ -1411,7 +1176,6 @@ def summarize_and_plot(df, effectiveness_data, script_version):
         print(f"    Total Vulnerabilities Found: {metrics['total_vulns']}")
         print(f"    Average Vulnerability Severity: {metrics['total_severity'] / max(1, metrics['total_vulns']):.2f}")
     
-    # Perform t-test for a key metric, e.g., vulnerability count
     if 'AI-Fuzzer' in overall_effectiveness and 'Random-Fuzzer' in overall_effectiveness:
         ai_vulns = [sum(eff['AI-Fuzzer']['vulnerability_counts']) for eff in effectiveness_data.values() if 'AI-Fuzzer' in eff]
         random_vulns = [sum(eff['Random-Fuzzer']['vulnerability_counts']) for eff in effectiveness_data.values() if 'Random-Fuzzer' in eff]
@@ -1435,7 +1199,6 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     output_plot_dir = f"plots_{script_version}"
     os.makedirs(output_plot_dir, exist_ok=True)
     
-    # Plot Metrics as CDFs
     def plot_cdf(df_to_plot, metric, ylabel, fuzzer_type, filename):
         plt.figure(figsize=(10, 6))
         for algo in df_to_plot['algorithm'].unique():
@@ -1459,11 +1222,9 @@ def summarize_and_plot(df, effectiveness_data, script_version):
         for fuzzer_type in scenario_df['fuzzer_type'].unique():
             fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
             
-            # CDF of 5th Percentile Throughput
             plot_cdf(fuzzer_df, 'throughput_5th_percentile_mbps', '5th Percentile Throughput (Mbps)', fuzzer_type,
                      f'{scenario.replace(" ", "_")}_{fuzzer_type.replace(" ", "_")}_5th_percentile_throughput_cdf.png')
             
-            # CDF of Average Transmission Time
             plot_cdf(fuzzer_df, 'avg_transmission_time_ms', 'Average Transmission Time (ms)', fuzzer_type,
                      f'{scenario.replace(" ", "_")}_{fuzzer_type.replace(" ", "_")}_avg_transmission_time_cdf.png')
 
@@ -1473,58 +1234,17 @@ def summarize_and_plot(df, effectiveness_data, script_version):
 def main():
     print(f"--- Starting AI Fuzzing Simulation ({SCRIPT_VERSION_NAME}) ---")
     print("--- H100 GPU Optimizations Enabled: ---")
-    print("  - Mixed precision (FP16/BF16) for tensor cores")
-    print("  - XLA JIT compilation with experimental optimizations")
-    print("  - Increased batch processing (64 inputs per batch)")
-    print("  - Parallel execution of fuzzing iterations")
-    print("  - Dynamic memory growth for optimal GPU utilization")
-    
-    # Log GPU information
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        for i, gpu in enumerate(gpus):
-            print(f"  - GPU {i}: {gpu}")
-            # Get memory info using a safer approach
-            try:
-                gpu_details = tf.config.experimental.get_device_details(gpu)
-                if gpu_details and 'device_name' in gpu_details:
-                    print(f"    * Device: {gpu_details['device_name']}")
-            except Exception as e:
-                print(f"    * Could not get detailed GPU info: {e}")
-    else:
-        print("  - No GPUs detected. Running on CPU only.")
+    print("  - Mixed precision (FP16) for tensor cores")
+    print("  - XLA JIT compilation")
     
     start_time_main = time.time()
     all_results_data = []
     all_fuzzer_effectiveness = {}
 
-    # Define a function to monitor GPU usage
-    def log_gpu_usage():
-        try:
-            gpus = tf.config.list_physical_devices('GPU')
-            if gpus:
-                print(f"Active GPUs: {len(gpus)}")
-                # Use nvidia-smi within Docker if available
-                try:
-                    import subprocess
-                    result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,memory.used', 
-                                            '--format=csv,noheader'], 
-                                            capture_output=True, text=True)
-                    if result.returncode == 0:
-                        print(f"GPU Utilization: {result.stdout.strip()}")
-                except:
-                    print("Could not get GPU utilization info")
-        except:
-            pass
-
     try:
-        # Configure TensorFlow logging
         if ENABLE_TF_DEVICE_LOGGING: 
             tf.debugging.set_log_device_placement(False) 
-        tf.get_logger().setLevel('ERROR')
-        
-        # Log initial GPU usage
-        log_gpu_usage()
+        tf.get_logger().setLevel('ERROR') 
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
             tf.config.set_visible_devices(gpus[0], 'GPU')
