@@ -714,13 +714,15 @@ class AIFuzzer:
             qoe_violations = 0.0
             if high_prio_ues > 0:
                 assigned_sinr_hp_ues = [sinr[j, new_assignments[j]] for j in range(self.env.num_ues) if high_prio_mask[j]]
-                qoe_violations = np.sum(np.array(assigned_sinr_hp_ues) < 5.0)
+                # سخت‌تر کردن شرط: کمتر از 1.0 dB به جای 5.0
+                qoe_violations = np.sum(np.array(assigned_sinr_hp_ues) < 1.0)
             objectives['qoe_violation'] = qoe_violations / high_prio_ues if high_prio_ues > 0 else 0.0
             
             assigned_sinr_np = np.array([sinr[j, new_assignments[j]] for j in range(self.env.num_ues)])
             assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
             jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
-            objectives['unfairness'] = 1.0 - jain_score
+            # سخت‌تر کردن شرط برای unfairness: اگر jain_score < 0.1 باشد، unfairness بالاتر
+            objectives['unfairness'] = max(1.0 - jain_score, 0.0) if jain_score < 0.1 else 1.0 - jain_score
             objectives['energy_consumption'] = num_handovers / max(1, self.env.num_ues)
             
             results.append([objectives['handovers'], objectives['qoe_violation'], objectives['unfairness'], objectives['energy_consumption']])
