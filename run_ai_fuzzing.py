@@ -83,9 +83,9 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-SIMULATION_ITERATIONS = 20
-FUZZER_GENERATIONS = 25
-FUZZER_POPULATION = 10
+SIMULATION_ITERATIONS = 100
+FUZZER_GENERATIONS = 50
+FUZZER_POPULATION = 20
 
 # Use NSGA-II for multi-objective optimization as described in the paper
 ENABLE_NSGA2_FUZZER = True
@@ -1156,7 +1156,7 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
 
 def summarize_and_plot(df, effectiveness_data, script_version):
     """
-    Generates summary statistics and plots for the paper.
+    Generates summary statistics and a consolidated 2x2 panel plot for the paper, saved as a PDF.
     """
     if df.empty:
         print("No data available for summary or plotting.")
@@ -1212,38 +1212,55 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     
     output_plot_dir = f"plots_{script_version}"
     os.makedirs(output_plot_dir, exist_ok=True)
-    
-    def plot_cdf(df_to_plot, metric, ylabel, fuzzer_type, filename):
-        plt.figure(figsize=(10, 6))
-        for algo in df_to_plot['algorithm'].unique():
-            algo_df = df_to_plot[df_to_plot['algorithm'] == algo]
-            data = algo_df[metric].dropna().sort_values().reset_index(drop=True)
-            if data.empty: continue
-            y = np.linspace(0, 1, len(data))
-            plt.plot(data, y, label=f"{algo} ({fuzzer_type})", linewidth=2)
-        plt.title(f'CDF of {ylabel} - Scenario: {df_to_plot["scenario"].iloc[0]}')
-        plt.xlabel(ylabel)
-        plt.ylabel('Cumulative Probability')
-        plt.legend()
-        plt.grid(True, linestyle='--')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_plot_dir, filename))
-        plt.close()
 
-    scenarios = df['scenario'].unique()
-    for scenario in scenarios:
-        scenario_df = df[df['scenario'] == scenario]
-        for fuzzer_type in scenario_df['fuzzer_type'].unique():
-            fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
-            
-            plot_cdf(fuzzer_df, 'throughput_5th_percentile_mbps', '5th Percentile Throughput (Mbps)', fuzzer_type,
-                     f'{scenario.replace(" ", "_")}_{fuzzer_type.replace(" ", "_")}_5th_percentile_throughput_cdf.png')
-            
-            plot_cdf(fuzzer_df, 'avg_transmission_time_ms', 'Average Transmission Time (ms)', fuzzer_type,
-                     f'{scenario.replace(" ", "_")}_{fuzzer_type.replace(" ", "_")}_avg_transmission_time_cdf.png')
+    # --- New 2x2 Panel Plot Generation ---
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Fuzzer Impact on QoE Metrics Across Scenarios', fontsize=16)
 
-    print(f"All plots saved to {output_plot_dir}")
+    scenarios = ['Stable Mobility', 'Stable High Load']
+    metrics_to_plot = [
+        {'col': 'throughput_5th_percentile_mbps', 'label': '5th Percentile Throughput (Mbps)', 'xlim': (0, 30)},
+        {'col': 'avg_transmission_time_ms', 'label': 'Average Transmission Time (ms)', 'xlim': (0, 7)}
+    ]
     
+    # Define colors and line styles for clarity
+    colors = {'Baseline': 'C0', 'Utility': 'C1', 'ML-Based': 'C2'}
+    linestyles = {'AI-Fuzzer': '-', 'Random-Fuzzer': '--'}
+    
+    for i, metric_info in enumerate(metrics_to_plot):
+        for j, scenario in enumerate(scenarios):
+            ax = axes[i, j]
+            scenario_df = df[df['scenario'] == scenario]
+            
+            for fuzzer_type in ['AI-Fuzzer', 'Random-Fuzzer']:
+                fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
+                for algo in ['Baseline', 'Utility', 'ML-Based']:
+                    algo_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
+                    data = algo_df[metric_info['col']].dropna().sort_values().reset_index(drop=True)
+                    
+                    if not data.empty:
+                        y = np.linspace(0, 1, len(data))
+                        ax.plot(data, y, 
+                                label=f"{algo} ({fuzzer_type.replace('-Fuzzer', '')})", 
+                                color=colors[algo],
+                                linestyle=linestyles[fuzzer_type],
+                                linewidth=2)
+
+            ax.set_title(f'CDF of {metric_info["label"]}\nScenario: {scenario}')
+            ax.set_xlabel(metric_info['label'])
+            ax.set_ylabel('Cumulative Probability')
+            ax.grid(True, linestyle='--')
+            ax.legend()
+            ax.set_xlim(metric_info['xlim'])
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust layout to make room for suptitle
+    
+    # Save the consolidated figure as a PDF
+    pdf_filename = os.path.join(output_plot_dir, 'consolidated_qoe_cdfs.pdf')
+    plt.savefig(pdf_filename, format='pdf', bbox_inches='tight')
+    plt.close()
+
+    print(f"Consolidated 2x2 plot saved to {pdf_filename}")    
     
 def main():
     print(f"--- Starting AI Fuzzing Simulation ({SCRIPT_VERSION_NAME}) ---")
