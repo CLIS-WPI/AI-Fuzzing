@@ -1,6 +1,9 @@
 # AI-Fuzzing: Vulnerability Analysis for Wireless Traffic Steering
 docker build -t ai-fuzzing .
-docker run --gpus all --rm -v $(pwd):/workspace ai-fuzzing
+
+docker run --gpus all --user root -it -v $(pwd):/workspace -w /workspace ai-fuzzing:latest
+
+nsys profile --trace=cuda,osrt,nvtx --output=/workspace/report --force-overwrite=true python run_ai_fuzzing.py
 
 ## Overview
 AI-Fuzzing is a simulation framework designed to analyze vulnerabilities in traffic steering algorithms for wireless networks using AI-based fuzzing. Traffic steering directs user equipment (UE) to appropriate cells based on metrics like Signal-to-Interference-plus-Noise Ratio (SINR) and load, aiming to ensure Quality of Service (QoS), fairness, and stability. This project uses fuzzing to stress-test these algorithms, identifying vulnerabilities such as QoS violations, unfair resource allocation, and ping-pong handovers (rapid UE switching between cells).

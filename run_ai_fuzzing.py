@@ -83,7 +83,7 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-SIMULATION_ITERATIONS = 100
+SIMULATION_ITERATIONS = 200
 FUZZER_GENERATIONS = 50
 FUZZER_POPULATION = 20
 
@@ -131,7 +131,7 @@ class NetworkEnvironment:
     """
     def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
         # Batch size is set here to accommodate the full fuzzer population.
-        self.batch_size = 128
+        self.batch_size = 512
         self.num_ues = num_ues
         
         # The number of cells is now determined by the global constant
@@ -638,6 +638,15 @@ class AIFuzzer:
         # MODIFICATION 3: Change objectives to be more specific
         self.num_objectives = 3 # instability, qoe_degradation, unfairness
         self.pareto_archive = []
+        
+        # For convergence analysis
+        self.convergence_history = {
+            'generation': [],
+            'best_objective_sum': [],
+            'avg_objective_sum': [],
+            'best_objective_values': [],
+            'num_vulnerabilities': []
+        }
         self.vulnerability_memory = []
 
     def _calculate_jain_fairness(self, allocations):
