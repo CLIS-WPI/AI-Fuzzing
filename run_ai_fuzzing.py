@@ -136,7 +136,7 @@ class NetworkEnvironment:
     def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
         # Use batch size of 1 for the main environment to avoid shape issues
         # The AIFuzzer will handle batching for optimization
-        self.batch_size = 1  # Use batch size of 1 for the environment
+        self.batch_size = 2048  # Use batch size of 1 for the environment
         self.num_ues = num_ues
         
         if active_cell_indices is None:
@@ -826,7 +826,7 @@ class AIFuzzer:
         
         results = []
         # Process inputs in batches to better utilize H100 GPU
-        batch_size = min(8, len(inputs))  # Process smaller batches to avoid memory issues
+        batch_size = min(256, len(inputs))  # Process smaller batches to avoid memory issues
         
         for batch_start in range(0, len(inputs), batch_size):
             batch_end = min(batch_start + batch_size, len(inputs))
