@@ -545,7 +545,6 @@ def main():
         print("- Figure 3: Vulnerability breakdown heatmap")
         print("- Figure 5: Scenario comparison")
         print("- Summary table (CSV format)")
-        print("\nThese figures should be sufficient for your ICC paper!")
     else:
         print("Could not proceed due to data loading error.")
 
