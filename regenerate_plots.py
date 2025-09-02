@@ -18,18 +18,21 @@ from scipy import stats
 CSV_FILENAME = "fuzzing_results_v28_strategic_fuzzing.csv"
 OUTPUT_DIR = "plots_for_publication"
 
-# Set professional plotting style
+# Set professional plotting style with increased font brightness/clarity
 plt.rcParams.update({
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
-    'figure.titlesize': 16,
+    'font.size': 14,                  # Increased from 12
+    'axes.titlesize': 16,             # Increased from 14
+    'axes.labelsize': 14,             # Increased from 12
+    'xtick.labelsize': 12,            # Increased from 10
+    'ytick.labelsize': 12,            # Increased from 10
+    'legend.fontsize': 12,            # Increased from 10
+    'figure.titlesize': 18,           # Increased from 16
     'font.family': 'serif',
     'font.serif': ['Times New Roman', 'DejaVu Serif'],
     'text.usetex': False,
+    'font.weight': 'bold',            # Added bold font weight
+    'axes.titleweight': 'bold',       # Bold title
+    'axes.labelweight': 'medium',     # Medium weight for labels
     'axes.grid': True,
     'grid.alpha': 0.3
 })
@@ -138,17 +141,18 @@ def create_fig2_qoe_performance(df, output_dir):
             if not data.empty:
                 y = np.linspace(0, 1, len(data))
                 ax.plot(data, y, label=fuzzer, color=colors[fuzzer], 
-                       linestyle=linestyles[fuzzer], linewidth=2.5)
+                       linestyle=linestyles[fuzzer], linewidth=3.0)  # Increased linewidth from 2.5 to 3.0
         
-        ax.set_title(f'{scenario}', fontsize=12)
-        ax.set_xlabel('5th Percentile Throughput (Mbps)', fontsize=10)
-        ax.set_ylabel('Cumulative Probability', fontsize=10)
-        ax.legend(fontsize=9)
+        # Add subplot labels (a), (b), (c), (d)
+        subplot_labels = ['(a)', '(b)', '(c)', '(d)']
+        ax.set_title(f'{subplot_labels[i]} {scenario}', fontsize=14, fontweight='bold')
+        ax.set_xlabel('5th Percentile Throughput (Mbps)', fontsize=13, fontweight='medium')
+        ax.set_ylabel('Cumulative Probability', fontsize=13, fontweight='medium')
+        ax.legend(fontsize=12, framealpha=0.9)  # Increased font size and frame opacity
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, 25)
     
-    plt.suptitle('Impact on Network QoE: Lower is Worse (AI-Fuzzer Creates Worst Conditions)', 
-                 fontsize=14, y=0.98)
+    # Removed the main title "Impact on Network QoE: Lower is Worse (AI-Fuzzer Creates Worst Conditions)"
     plt.tight_layout()
     
     output_path = os.path.join(output_dir, 'fig_2_qoe_performance.pdf')
@@ -161,20 +165,20 @@ def create_fig2_qoe_performance(df, output_dir):
 def create_fig3_vulnerability_heatmap(df, output_dir):
     """Figure 3: Vulnerability type breakdown across scenarios."""
     print("Generating Figure 3: Vulnerability Breakdown Heatmap...")
-    
+
     fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzer (NSGA-II)', 'Hill Climbing', 'Random'])]
-    
+
     # Create vulnerability breakdown
     vuln_types = ['has_ping_pong', 'has_qoe_violation', 'has_unfairness', 'is_critical_failure']
     vuln_labels = ['Ping-Pong\nHandovers', 'QoE\nViolations', 'Unfairness\nEvents', 'Critical\nFailures']
-    
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 8)) # Maintained larger figure size
+
     scenarios = fuzzing_df['scenario'].unique()
-    
+
     for i, fuzzer in enumerate(['Random', 'Hill Climbing', 'AI-Fuzzer (NSGA-II)']):
         fuzzer_df = fuzzing_df[fuzzing_df['fuzzer_type'] == fuzzer]
-        
+
         # Create matrix for heatmap
         heatmap_data = []
         for scenario in scenarios:
@@ -184,35 +188,50 @@ def create_fig3_vulnerability_heatmap(df, output_dir):
                 count = scenario_df[vuln_type].sum() if vuln_type in scenario_df.columns else 0
                 scenario_data.append(count)
             heatmap_data.append(scenario_data)
-        
+
         heatmap_matrix = np.array(heatmap_data)
-        
-        # Create heatmap
-        im = axes[i].imshow(heatmap_matrix, cmap='Reds', aspect='auto')
-        
-        # Add text annotations
+
+        # Create heatmap with stronger contrast
+        im = axes[i].imshow(heatmap_matrix, cmap='Reds', aspect='auto', vmin=0, 
+                          vmax=max(1, np.max(heatmap_matrix) * 1.1))  # Improve color contrast
+
+        # Add text annotations with increased font size and better visibility
         for row in range(len(scenarios)):
             for col in range(len(vuln_types)):
-                text = axes[i].text(col, row, f'{int(heatmap_matrix[row, col])}',
-                                  ha="center", va="center", color="black", fontweight='bold')
+                value = int(heatmap_matrix[row, col])
+                # Change text color based on cell value for better contrast
+                text_color = "black" if value < np.max(heatmap_matrix) * 0.7 else "white"
+                text = axes[i].text(col, row, f'{value}',
+                                  ha="center", va="center", 
+                                  color=text_color, 
+                                  fontweight='bold', 
+                                  fontsize=16)  # Increased from 14
         
-        axes[i].set_title(f'{fuzzer}', fontsize=14)
+        # Set main title (fuzzer name)
+        axes[i].set_title(f'{fuzzer}', fontsize=20, fontweight='bold')
+        
+        # Add (a), (b), (c) labels under the titles with adjusted positioning
+        # Moving them further down to avoid crossing with the subtitle
+        subplot_labels = ['(a)', '(b)', '(c)']
+        axes[i].text(0.5, -0.2, subplot_labels[i], transform=axes[i].transAxes,
+                    ha='center', va='center', fontsize=18, fontweight='bold')
         axes[i].set_xticks(range(len(vuln_labels)))
-        axes[i].set_xticklabels(vuln_labels, rotation=45, ha='right')
+        axes[i].set_xticklabels(vuln_labels, rotation=45, ha='right', fontsize=16, fontweight='medium') # Increased size
         axes[i].set_yticks(range(len(scenarios)))
-        axes[i].set_yticklabels(scenarios)
-        
-        # Add colorbar
-        plt.colorbar(im, ax=axes[i], shrink=0.6)
-    
-    plt.suptitle('Vulnerability Discovery Pattern Analysis', fontsize=16, y=0.98)
+        axes[i].set_yticklabels(scenarios, fontsize=16, fontweight='medium') # Increased size
+
+        # Add colorbar with better visibility
+        cbar = plt.colorbar(im, ax=axes[i], shrink=0.6)
+        cbar.ax.tick_params(labelsize=14, labelcolor='black') # Increased size and ensured black color
+
+    # Removed the main title "Vulnerability Discovery Pattern Analysis"
     plt.tight_layout()
-    
+
     output_path = os.path.join(output_dir, 'fig_3_vulnerability_heatmap.pdf')
     plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
     plt.savefig(os.path.join(output_dir, 'fig_3_vulnerability_heatmap.png'), dpi=300, bbox_inches='tight')
     plt.close()
-    
+
     print(f"-> Figure 3 saved to {output_path}")
 
 def create_fig4_statistical_analysis(df, output_dir):
@@ -263,9 +282,9 @@ def create_fig4_statistical_analysis(df, output_dir):
 def create_fig5_scenario_comparison(df, output_dir):
     """Figure 5: Scenario-wise detailed comparison."""
     print("Generating Figure 5: Scenario Comparison...")
-    
+
     fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzer (NSGA-II)', 'Hill Climbing', 'Random'])]
-    
+
     # Create scenario comparison
     scenario_summary = fuzzing_df.groupby(['scenario', 'fuzzer_type']).agg({
         'is_critical_failure': 'sum',
@@ -273,21 +292,21 @@ def create_fig5_scenario_comparison(df, output_dir):
         'handover_rate': 'mean',
         'jain_fairness_index': 'mean'
     }).round(2)
-    
+
     scenarios = fuzzing_df['scenario'].unique()
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12)) # Maintained larger figure size
     axes = axes.flatten()
-    
+
     metrics = [
         ('is_critical_failure', 'Critical Failures'),
         ('vulnerability_count', 'Total Vulnerabilities'),
         ('handover_rate', 'Average Handover Rate'),
         ('jain_fairness_index', 'Jain Fairness Index')
     ]
-    
+
     for i, (metric, title) in enumerate(metrics):
         ax = axes[i]
-        
+
         data_to_plot = []
         labels = []
         for scenario in scenarios:
@@ -300,34 +319,80 @@ def create_fig5_scenario_comparison(df, output_dir):
                     scenario_data.append(0)
             data_to_plot.append(scenario_data)
             labels.append(scenario)
-        
+
         x = np.arange(len(scenarios))
         width = 0.25
-        
+
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
         fuzzer_names = ['Random', 'Hill Climbing', 'AI-Fuzzer (NSGA-II)']
-        
+
         for j, (fuzzer, color) in enumerate(zip(fuzzer_names, colors)):
             values = [data_to_plot[k][j] for k in range(len(scenarios))]
-            ax.bar(x + j*width, values, width, label=fuzzer, color=color, alpha=0.8)
+            # Add black edge to bars for better clarity
+            bars = ax.bar(x + j*width, values, width, label=fuzzer, color=color, 
+                         alpha=0.85, # Increased from 0.8
+                         edgecolor='black', linewidth=0.8) # Added black border for contrast
+            
+            # Add value labels on top of bars for metrics with discrete counts
+            if metric in ['is_critical_failure', 'vulnerability_count']:
+                for k, bar in enumerate(bars):
+                    height = bar.get_height()
+                    if height > 0:  # Only add labels to non-zero bars
+                        # Position the text with slightly more vertical offset
+                        ax.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                              f'{int(height)}', ha='center', va='bottom', 
+                              fontsize=11, fontweight='bold')
+
+        # Replace subplot titles with just (a), (b), (c), (d) labels
+        subplot_labels = ['(a)', '(b)', '(c)', '(d)']
+        ax.set_title(f"{subplot_labels[i]}", fontsize=18, fontweight='bold')
         
-        ax.set_title(title, fontsize=12)
-        ax.set_xlabel('Scenario', fontsize=10)
-        ax.set_ylabel('Value', fontsize=10)
+        ax.set_xlabel('Scenario', fontsize=16, fontweight='medium')
+        
+        # Set specific y-axis labels based on the metric
+        y_labels = {
+            'is_critical_failure': 'Number of Critical Failures',
+            'vulnerability_count': 'Number of Vulnerabilities',
+            'handover_rate': 'Handover Rate (per second)',
+            'jain_fairness_index': 'Fairness Index (0-1)'
+        }
+        ax.set_ylabel(y_labels[metric], fontsize=16, fontweight='medium')
+        
+        # For subplots (a) and (b), adjust the y-axis limit to ensure number labels don't cross lines
+        if metric in ['is_critical_failure', 'vulnerability_count']:
+            # Get current y-limit
+            current_ylim = ax.get_ylim()
+            # Find the maximum value in the plot
+            max_val = 0
+            for j in range(len(scenarios)):
+                for k in range(3):  # 3 fuzzers
+                    try:
+                        val = data_to_plot[j][k]
+                        if val > max_val:
+                            max_val = val
+                    except:
+                        pass
+            # Set new y-limit with extra 20% padding on top for the labels
+            ax.set_ylim(0, max(current_ylim[1], max_val * 1.2))
         ax.set_xticks(x + width)
-        ax.set_xticklabels(labels, rotation=45, ha='right')
-        if i == 0:
-            ax.legend()
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=14, fontweight='medium')
+        ax.tick_params(axis='y', labelsize=14)
         ax.grid(True, alpha=0.3)
-    
-    plt.suptitle('Comprehensive Scenario Analysis', fontsize=16, y=0.98)
-    plt.tight_layout()
-    
+
+    # Add a single legend for the entire figure at the bottom
+    fig.legend(['Random', 'Hill Climbing', 'AI-Fuzzer (NSGA-II)'], 
+              fontsize=14, framealpha=0.9, loc='lower center',
+              bbox_to_anchor=(0.5, 0.02), # Position at the bottom of the figure
+              ncol=3) # Put all items in one row
+
+    # Adjusted padding to accommodate the common legend at the bottom
+    plt.tight_layout(rect=[0, 0.08, 1, 1]) # Add space at the bottom for legend
+
     output_path = os.path.join(output_dir, 'fig_5_scenario_comparison.pdf')
     plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
     plt.savefig(os.path.join(output_dir, 'fig_5_scenario_comparison.png'), dpi=300, bbox_inches='tight')
     plt.close()
-    
+
     print(f"-> Figure 5 saved to {output_path}")
 
 def create_fig6_network_topology(output_dir):
@@ -469,24 +534,18 @@ def main():
     df = load_and_prepare_data(CSV_FILENAME)
     
     if df is not None:
-        create_fig1_main_effectiveness(df, OUTPUT_DIR)
         create_fig2_qoe_performance(df, OUTPUT_DIR)
         create_fig3_vulnerability_heatmap(df, OUTPUT_DIR)
-        create_fig4_statistical_analysis(df, OUTPUT_DIR)
         create_fig5_scenario_comparison(df, OUTPUT_DIR)
-        create_fig6_network_topology(OUTPUT_DIR)
         generate_summary_table(df, OUTPUT_DIR)
         
         print(f"\n=== ALL PLOTS GENERATED SUCCESSFULLY ===")
         print(f"Check the '{OUTPUT_DIR}' directory for:")
-        print("- Figure 1: Main effectiveness comparison (KEY RESULT)")
         print("- Figure 2: QoE performance analysis") 
         print("- Figure 3: Vulnerability breakdown heatmap")
-        print("- Figure 4: Statistical analysis")
         print("- Figure 5: Scenario comparison")
-        print("- Figure 6: Network topology illustration")
         print("- Summary table (CSV format)")
-        print("\nThese 6 figures should be sufficient for your ICC paper!")
+        print("\nThese figures should be sufficient for your ICC paper!")
     else:
         print("Could not proceed due to data loading error.")
 
