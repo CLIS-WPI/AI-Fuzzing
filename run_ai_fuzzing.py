@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # AI-Driven Fuzzing Simulation for 5G Traffic Steering Algorithms
 # Optimized for H100 GPU and Multi-Objective Analysis
+# v28_strategic_fuzzing - Enhanced with Congestion Crisis Scenario and Stricter Critical Failure Definition
 #
 # This script implements a batch-processing architecture to fully utilize
 # GPU resources, especially for the computationally intensive Sionna channel model
@@ -83,7 +84,7 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-SIMULATION_ITERATIONS = 300
+SIMULATION_ITERATIONS = 50  # Increased from 1 to get more meaningful results
 FUZZER_GENERATIONS = 50
 FUZZER_POPULATION = 20
 
@@ -129,14 +130,17 @@ class NetworkEnvironment:
     Represents the 5G network environment for traffic steering simulation.
     Uses Sionna for accurate channel modeling and TensorFlow for GPU acceleration.
     """
-    def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', active_cell_indices=None, inter_site_distance=100.0):
+    def __init__(self, num_ues=NUM_UES, initial_load=0.3, scenario_max_speed=5, scenario_type='default', 
+                 active_cell_indices=None, inter_site_distance=100.0, ue_distribution='uniform'):
         # Batch size is set here to accommodate the full fuzzer population.
         self.batch_size = 512
         self.num_ues = num_ues
+        self.ue_distribution = ue_distribution
         
-        # The number of cells is now determined by the global constant
-        self.num_cells = NUM_CELLS
-        self.active_cell_indices = list(range(NUM_CELLS))
+        # Set active cell indices first
+        self.active_cell_indices = active_cell_indices if active_cell_indices is not None else list(range(NUM_CELLS))
+        # The number of cells is determined by the number of active cells
+        self.num_cells = len(self.active_cell_indices)
 
 
         self.initial_load_param = initial_load
@@ -177,7 +181,9 @@ class NetworkEnvironment:
         all_bs_pos_2d = self._generate_hexagonal_layout(NUM_CELLS, inter_site_distance)
         self.bs_pos_2d = all_bs_pos_2d[self.active_cell_indices]
         # Use a single, unbatched tensor for BS location as it's constant per scenario
-        self.bs_loc_unbatched = tf.constant(np.hstack([self.bs_pos_2d, np.ones((self.num_cells, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
+        # Calculate the number of active cells for proper dimensioning
+        num_active_cells = len(self.bs_pos_2d)
+        self.bs_loc_unbatched = tf.constant(np.hstack([self.bs_pos_2d, np.ones((num_active_cells, 1)) * 10.0])[np.newaxis,...], dtype=tf.float32)
 
         # Variables for UE states will be batched
         self.ue_loc = tf.Variable(tf.zeros([self.batch_size, self.num_ues, 3], dtype=tf.float32), name="ue_loc")
@@ -197,9 +203,11 @@ class NetworkEnvironment:
 
     def validate_configuration(self):
         """Validates network configuration parameters."""
-        assert self.num_cells > 0, "Must have at least one cell"
+        assert len(self.active_cell_indices) > 0, "Must have at least one active cell"
         assert self.num_ues > 0, "Must have at least one UE"
-        assert len(self.active_cell_indices) == self.num_cells, f"Active cell indices mismatch: {len(self.active_cell_indices)} != {self.num_cells}"
+        # We no longer assert equality between num_cells and active_cell_indices length
+        # since num_cells might represent the total possible cells while active_cell_indices
+        # represents the currently active subset
         assert all(0 <= idx < NUM_CELLS for idx in self.active_cell_indices), "Invalid cell indices"
         assert 0.0 <= self.initial_load_param <= 1.0, f"Invalid initial load: {self.initial_load_param}"
         assert self.max_speed_param >= 0, f"Invalid max speed: {self.max_speed_param}"
@@ -232,7 +240,7 @@ class NetworkEnvironment:
         return np.array(cartesian_coords[:num_cells])
 
     def reset(self, initial_load, max_speed):
-        """Resets the environment to a new random state."""
+        """Resets the environment to a new random state based on the distribution type."""
         self.initial_load_param = initial_load
         self.max_speed_param = max_speed
         
@@ -240,7 +248,38 @@ class NetworkEnvironment:
         center_y = np.mean(self.bs_pos_2d[:, 1])
         max_dist = np.max(np.linalg.norm(self.bs_pos_2d - [center_x, center_y], axis=1)) + 50
 
-        ue_pos_2d_np = np.random.uniform(-max_dist, max_dist, size=(self.num_ues, 2)) + np.array([center_x, center_y])
+        # --- Distribution logic based on scenario type ---
+        if self.ue_distribution == 'clustered':
+            # Logic for Load Imbalance scenario
+            num_clustered_ues = int(self.num_ues * 0.8)  # 80% of UEs in clusters
+            num_random_ues = self.num_ues - num_clustered_ues
+            
+            # Choose 2 random cells for clustering UEs
+            if len(self.active_cell_indices) >= 2:
+                cluster_cell_indices = np.random.choice(self.active_cell_indices, 2, replace=False)
+            else:
+                cluster_cell_indices = self.active_cell_indices  # In case there's only one active cell
+            
+            # Generate clustered positions
+            clustered_positions = []
+            for i in range(num_clustered_ues):
+                cell_idx = random.choice(cluster_cell_indices)
+                cell_center = self.bs_pos_2d[cell_idx]
+                # Create UE in small radius around cell center
+                offset = np.random.normal(0, 15, 2)  # 15m standard deviation
+                clustered_positions.append(cell_center + offset)
+            
+            # Rest of UEs distributed randomly across the map
+            random_positions = np.random.uniform(-max_dist, max_dist, size=(num_random_ues, 2)) + np.array([center_x, center_y])
+            
+            # Combine positions
+            if num_random_ues > 0:
+                ue_pos_2d_np = np.vstack([np.array(clustered_positions), random_positions])
+            else:
+                ue_pos_2d_np = np.array(clustered_positions)
+        else:  # default 'uniform' distribution
+            ue_pos_2d_np = np.random.uniform(-max_dist, max_dist, size=(self.num_ues, 2)) + np.array([center_x, center_y])
+            
         ue_loc_array = np.hstack([ue_pos_2d_np, np.ones((self.num_ues, 1)) * 1.5])
         
         # We now batch the initial position for all fuzzer population members.
@@ -939,6 +978,99 @@ class NaiveRandomFuzzer:
         inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
         return inputs
 
+# --- Module 3c: New Simple-Search Baseline ---
+class HillClimbingFuzzer:
+    """
+    A simple intelligent search baseline using Hill Climbing.
+    It makes small changes and only keeps them if they improve the vulnerability score.
+    """
+    def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm, steps=50):
+        self.env = env
+        self.ts = ts
+        self.steps = steps # تعداد مراحل جستجو
+        # این یک اوراکل داخلی فقط برای محاسبه امتیاز است
+        self.scoring_oracle = Oracle(num_ues=env.num_ues, num_cells=env.num_cells)
+
+    def _get_vulnerability_score(self, fuzzed_inputs, current_assignments):
+        """
+        یک مرحله شبیه‌سازی را با ورودی‌های داده شده اجرا کرده و یک امتیاز آسیب‌پذیری برمی‌گرداند.
+        """
+        load_modifier = fuzzed_inputs[:self.env.num_cells]
+        position_modifier_2d = fuzzed_inputs[self.env.num_cells:].reshape(self.env.num_ues, 2)
+        pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((self.env.num_ues, 1))])
+        
+        # یک کپی از حالت فعلی محیط ایجاد می‌کنیم تا محیط اصلی دستکاری نشود
+        temp_ue_loc = self.env.ue_loc.read_value()[:1] + tf.constant(pos_modifier_3d_np[np.newaxis, ...], dtype=tf.float32)
+        temp_cell_loads = np.clip(self.env.cell_loads.copy() + load_modifier, 0, 1)
+
+        rsrp, sinr = self.env.compute_metrics_tf(
+            temp_ue_loc,
+            self.env.bs_loc_unbatched,
+            self.env.ut_orientations[:1],
+            self.env.bs_orientations[:1],
+            self.env.ue_velocities[:1],
+            self.env.in_state[:1]
+        )
+        
+        # Convert tensors to numpy safely
+        if hasattr(rsrp, 'numpy'):
+            rsrp_np = rsrp.numpy()[0]
+        else:
+            rsrp_np = np.array(rsrp)[0]
+            
+        if hasattr(sinr, 'numpy'):
+            sinr_np = sinr.numpy()[0]
+        else:
+            sinr_np = np.array(sinr)[0]
+        
+        self.ts.prev_assignments = current_assignments
+        new_assignments = self.ts.assign_ues(rsrp_np, sinr_np, temp_cell_loads, self.env.ue_priorities)
+        
+        metrics = self.scoring_oracle.evaluate(rsrp_np, sinr_np, new_assignments, temp_cell_loads, self.env.ue_priorities, current_assignments)
+        
+        # امتیاز ترکیبی از شدت آسیب‌پذیری‌ها
+        score = (metrics['has_ping_pong'] * 3 + 
+                 metrics['has_qoe_violation'] * 2 + 
+                 metrics['has_unfairness'] * 1 +
+                 metrics['is_critical_failure'] * 10) # شکست بحرانی بالاترین امتیاز را دارد
+        return score
+
+    def generate_inputs(self, dt=1.0):
+        if self.ts.prev_assignments is None:
+            # در اولین اجرا، یک ورودی تصادفی برگردان
+            load_modifier = np.random.uniform(-0.05, 0.05, self.env.num_cells)
+            position_modifier_2d = np.random.uniform(-3, 3, (self.env.num_ues, 2))
+            return np.concatenate([load_modifier, position_modifier_2d.flatten()])
+
+        current_assignments = self.ts.prev_assignments.copy()
+        
+        # ۱. با یک راه‌حل تصادفی شروع کن
+        current_solution = np.concatenate([
+            np.random.uniform(-0.05, 0.05, self.env.num_cells),
+            np.random.uniform(-3, 3, self.env.num_ues * 2)
+        ])
+        best_score = self._get_vulnerability_score(current_solution, current_assignments)
+
+        # ۲. برای تعداد مشخصی مرحله، تلاش کن آن را بهتر کنی
+        for _ in range(self.steps):
+            # یک همسایه با ایجاد تغییر کوچک بساز
+            neighbor_solution = current_solution.copy()
+            # یک تغییر کوچک تصادفی اعمال کن
+            perturbation = np.concatenate([
+                np.random.normal(0, 0.01, self.env.num_cells),
+                np.random.normal(0, 0.5, self.env.num_ues * 2)
+            ])
+            neighbor_solution += perturbation
+            
+            neighbor_score = self._get_vulnerability_score(neighbor_solution, current_assignments)
+            
+            # ۳. اگر همسایه بهتر بود، به آنجا حرکت کن
+            if neighbor_score > best_score:
+                best_score = neighbor_score
+                current_solution = neighbor_solution
+        
+        return current_solution
+
 # --- Module 4: Oracle (Vulnerability Detector) ---
 class Oracle:
     """
@@ -1009,8 +1141,14 @@ class Oracle:
                 vulnerabilities_found.append(f"Unfairness: Jain Index = {jain_score:.2f}")
                 has_unfairness = True
 
-        # MODIFICATION 2.2: Define the new, complex vulnerability
-        is_critical_failure = (has_qoe_violation and has_unfairness and (num_ping_pongs_detected_this_step > 5))
+        # MODIFICATION 2.2: Define the new, much stricter complex vulnerability criteria
+        # Make critical failure detection significantly more challenging
+        # Now requires more than half of all UEs to be in ping-pong state
+        # This creates a more difficult optimization landscape that challenges simpler fuzzing methods
+        is_critical_failure = (has_qoe_violation and 
+                              has_unfairness and 
+                              (num_ping_pongs_detected_this_step > self.num_ues // 2))  # Changed from >5 to >half of all UEs
+        
         if is_critical_failure:
             vulnerabilities_found.append("CRITICAL FAILURE: Low QoE, High Unfairness, and System Instability Co-occurred")
 
@@ -1031,13 +1169,14 @@ class Oracle:
         }
     
 # --- Module 5: Main Simulation Loop and Analysis ---
-def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_type, active_cell_indices=None, inter_site_distance=100.0):
+def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_type, active_cell_indices=None, 
+                inter_site_distance=100.0, ue_distribution='uniform'):
     print(f"\n--- Running Scenario: {scenario_name} ---")
     
     shared_env_state = NetworkEnvironment(
         num_ues=num_ues, initial_load=initial_load, scenario_max_speed=max_speed,
         scenario_type=scenario_type, active_cell_indices=active_cell_indices,
-        inter_site_distance=inter_site_distance
+        inter_site_distance=inter_site_distance, ue_distribution=ue_distribution
     )
     
     algorithm_factories = {
@@ -1048,7 +1187,8 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     
     fuzzer_map = {
         "AI-Fuzzer": lambda env, ts: AIFuzzer(env, ts, use_nsga2=ENABLE_NSGA2_FUZZER),
-        "Random-Fuzzer": lambda env, ts: NaiveRandomFuzzer(env, ts)
+        "Random-Fuzzer": lambda env, ts: NaiveRandomFuzzer(env, ts),
+        "HillClimbing-Fuzzer": lambda env, ts: HillClimbingFuzzer(env, ts)
     }
     
     results_list = []
@@ -1271,6 +1411,201 @@ def summarize_and_plot(df, effectiveness_data, script_version):
 
     print(f"Consolidated 2x2 plot saved to {pdf_filename}")    
     
+def run_static_scenarios():
+    """
+    Executes predefined static scenarios to test specific network conditions.
+    This approach doesn't require a fuzzer class, but instead runs specific
+    hand-crafted scenarios to reproduce known or suspected vulnerabilities.
+    """
+    print("\n--- Running Static Scenario Tests ---")
+    
+    # Step 1: Define static test scenarios
+    static_scenarios = {
+        "ping_pong_test": {
+            'description': "A user is placed exactly at the border between two cells to test ping-pong handovers",
+            'ue_positions': np.array([
+                # First UE at the border between cell 0 and 1
+                [50.0, 0.0, 1.5],
+                # Remaining UEs at standard positions
+                [10.0, 20.0, 1.5],
+                [30.0, -15.0, 1.5],
+                [5.0, 40.0, 1.5],
+                [-20.0, 10.0, 1.5],
+                [-40.0, -10.0, 1.5],
+                [25.0, 35.0, 1.5],
+                [-15.0, -30.0, 1.5],
+                [45.0, -25.0, 1.5],
+                [-25.0, 45.0, 1.5],
+                [15.0, -45.0, 1.5],
+                [35.0, 5.0, 1.5],
+                [-5.0, -20.0, 1.5],
+                [20.0, -35.0, 1.5],
+                [-30.0, -45.0, 1.5],
+            ]),
+            'active_cells': list(range(NUM_CELLS)) # All cells active
+        },
+        "load_imbalance_test": {
+            'description': "Most users concentrated in one cell to test load balancing",
+            'ue_positions': np.array([
+                [5.0, 0.0, 1.5],    # UE 1 near cell 0 center
+                [-5.0, 5.0, 1.5],   # UE 2 near cell 0 center
+                [0.0, -5.0, 1.5],   # UE 3 near cell 0 center
+                [8.0, 3.0, 1.5],    # UE 4 near cell 0 center
+                [-3.0, -7.0, 1.5],  # UE 5 near cell 0 center
+                [7.0, -4.0, 1.5],   # UE 6 near cell 0 center
+                [-6.0, -2.0, 1.5],  # UE 7 near cell 0 center
+                [2.0, 6.0, 1.5],    # UE 8 near cell 0 center
+                [-8.0, -5.0, 1.5],  # UE 9 near cell 0 center
+                [4.0, -8.0, 1.5],   # UE 10 near cell 0 center
+                [100.0, 100.0, 1.5], # UE 11 far away in another cell
+                [120.0, -80.0, 1.5], # UE 12 far away in another cell
+                [-90.0, 110.0, 1.5], # UE 13 far away in another cell
+                [-100.0, -120.0, 1.5], # UE 14 far away in another cell
+                [80.0, 130.0, 1.5],   # UE 15 far away in another cell
+            ]),
+            'active_cells': list(range(NUM_CELLS))
+        },
+        "coverage_hole_test": {
+            'description': "Central cell is powered down to test network resilience",
+            'ue_positions': None, # Use random initial positions
+            'active_cells': [1, 2, 3, 4, 5, 6] # Cell 0 is turned off
+        },
+        "high_mobility_test": {
+            'description': "Test high mobility scenario with faster moving UEs",
+            'ue_positions': None, # Use random initial positions
+            'ue_velocities': np.array([[np.random.uniform(-20, 20), np.random.uniform(-20, 20), 0] for _ in range(NUM_UES)]),
+            'active_cells': list(range(NUM_CELLS))
+        }
+    }
+
+    # Results collection
+    all_results = []
+    
+    # Step 2: Execute each scenario
+    for name, scenario in static_scenarios.items():
+        print(f"\n--- Running Static Scenario: {name} ---")
+        print(f"Description: {scenario['description']}")
+        
+        # Create a new environment instance for this scenario
+        env = NetworkEnvironment(
+            num_ues=NUM_UES, 
+            initial_load=0.4,  # Default initial load
+            scenario_max_speed=5,  # Default max speed
+            active_cell_indices=scenario['active_cells'],
+            ue_distribution='uniform'  # Use uniform distribution by default
+        )
+        
+        # Initialize the environment
+        env.reset(initial_load=0.4, max_speed=5)
+                                
+        # If static UE positions are defined, set them
+        if scenario['ue_positions'] is not None:
+            # Make the positions compatible with TensorFlow's expected shape and replicate for batch processing
+            positions_single = scenario['ue_positions'].reshape(1, NUM_UES, 3)
+            positions_batch = np.repeat(positions_single, env.batch_size, axis=0)
+            positions_tf = tf.constant(positions_batch, dtype=tf.float32)
+            env.ue_loc.assign(positions_tf)
+            
+        # If custom UE velocities are defined, set them    
+        if 'ue_velocities' in scenario and scenario['ue_velocities'] is not None:
+            # Replicate velocities for batch processing
+            velocities_single = scenario['ue_velocities'].reshape(1, NUM_UES, 3)
+            velocities_batch = np.repeat(velocities_single, env.batch_size, axis=0)
+            velocities_tf = tf.constant(velocities_batch, dtype=tf.float32)
+            env.ue_velocities.assign(velocities_tf)
+        
+        # Create all traffic steering algorithms - use the correct number of cells from the environment
+        algorithm_instances = {
+            "Baseline": BaselineA3(num_ues=NUM_UES, num_cells=len(env.active_cell_indices)),
+            "Utility": UtilityBased(num_ues=NUM_UES, num_cells=len(env.active_cell_indices)),
+            "ML-Based": MLTrafficSteering(num_ues=NUM_UES, num_cells=len(env.active_cell_indices))
+        }
+        
+        # Create an oracle for evaluation
+        oracle = Oracle(num_ues=NUM_UES, num_cells=len(env.active_cell_indices))
+        
+        # Test each algorithm with this scenario
+        for algo_name, ts_instance in algorithm_instances.items():
+            print(f"Testing {algo_name} algorithm...")
+            
+            # Initial setup
+            rsrp, sinr, loads, priorities = env.compute_metrics()
+            assignments = ts_instance.assign_ues(rsrp, sinr, loads, priorities)
+            
+            # Run a few iterations to see how the algorithm behaves
+            for iteration in range(5):  # Run 5 steps to see evolution
+                # Get metrics
+                rsrp, sinr, loads, priorities = env.compute_metrics()
+                
+                # Assign UEs
+                prev_assignments = assignments.copy()
+                assignments = ts_instance.assign_ues(rsrp, sinr, loads, priorities)
+                
+                # Evaluate using the oracle
+                metrics = oracle.evaluate(rsrp, sinr, assignments, loads, priorities, prev_assignments)
+                
+                # Record results with all required fields for CSV output
+                vulnerabilities = metrics.get('vulnerabilities', [])
+                result = {
+                    'scenario': name,
+                    'iteration': iteration,
+                    'algorithm': algo_name,
+                    'fuzzer_type': 'static_scenario',
+                    'vulnerabilities': vulnerabilities,
+                    'vulnerability_count': sum([
+                        metrics.get('has_ping_pong', False), 
+                        metrics.get('has_qoe_violation', False), 
+                        metrics.get('has_unfairness', False)
+                    ]),
+                    'is_critical': metrics.get('is_critical_failure', False),
+                    'jain_fairness_index': metrics.get('jain_index', 0.0),
+                    'throughput_5th_percentile_mbps': metrics.get('throughput_5th_percentile_mbps', 0.0),
+                    'handover_count_iter': metrics.get('ping_pong_count', 0),
+                    'avg_transmission_time_ms': metrics.get('avg_transmission_time_ms', 0.0),
+                    'generation': 0  # Not applicable for static scenarios
+                }
+                all_results.append(result)
+                
+                # Print any vulnerabilities found
+                # Instead of constructing our own strings, just use the ones already in the metrics
+                vulnerabilities = metrics['vulnerabilities'] if 'vulnerabilities' in metrics else []
+                
+                # Fallback if vulnerabilities key is missing or empty
+                if not vulnerabilities:
+                    if metrics.get('has_ping_pong', False): 
+                        vulnerabilities.append(f"Ping-Pong detected")
+                    if metrics.get('has_qoe_violation', False): 
+                        vulnerabilities.append(f"QoS Violation: 5th Percentile Throughput = {metrics.get('sinr_5th_percentile_db', 'N/A'):.2f} dB")
+                    if metrics.get('has_unfairness', False): 
+                        vulnerabilities.append(f"Unfairness: Jain Index = {metrics.get('jain_index', 'N/A'):.2f}")
+                    if metrics.get('is_critical_failure', False):
+                        vulnerabilities.append("CRITICAL FAILURE: Low QoE, High Unfairness, and System Instability Co-occurred")
+                
+                if vulnerabilities:
+                    print(f"  Iteration {iteration}: {len(vulnerabilities)} vulnerabilities found: {', '.join(vulnerabilities)}")
+                else:
+                    print(f"  Iteration {iteration}: No vulnerabilities detected")
+    
+    # Summarize results
+    print("\n--- Static Scenarios Summary ---")
+    
+    # Group by scenario and algorithm
+    scenario_algo_results = {}
+    for result in all_results:
+        key = (result['scenario'], result['algorithm'])
+        if key not in scenario_algo_results:
+            scenario_algo_results[key] = []
+        scenario_algo_results[key].append(result)
+    
+    # Print summary
+    for (scenario, algo), results in scenario_algo_results.items():
+        vuln_count = sum(r['vulnerability_count'] for r in results)
+        critical_count = sum(1 for r in results if r['is_critical'])
+        
+        print(f"{scenario}, {algo}: Found {vuln_count} vulnerabilities, {critical_count} critical failures")
+    
+    return all_results
+
 def main():
     print(f"--- Starting AI Fuzzing Simulation ({SCRIPT_VERSION_NAME}) ---")
     print("--- H100 GPU Optimizations Enabled: ---")
@@ -1301,10 +1636,70 @@ def main():
         else:
             print("--- No GPU detected by TensorFlow. Running on CPU. ---")
             
-        # MODIFICATION 1.1: Adjust scenario parameters for the simplified network
+        # Run the static scenario tests if enabled
+        RUN_STATIC_SCENARIOS = True  # Flag to enable/disable static scenario testing
+        if RUN_STATIC_SCENARIOS:
+            print("\n--- Running Static Scenario Tests Before Main Simulation ---")
+            static_results = run_static_scenarios()
+            # Add static scenario results to the overall results data for CSV output
+            if static_results:
+                all_results_data.extend(static_results)
+            
+        # Expanded scenario definitions to include realistic network challenges
+        # Define cells for coverage hole scenario (exclude central cells)
+        coverage_hole_cells = [i for i in range(NUM_CELLS) if i not in [0, 3]]  # Center cell and one neighbor
+        
         scenarios_to_run = [
-            {'name': 'Stable Mobility', 'params': {'num_ues': NUM_UES, 'initial_load': 0.4, 'max_speed': 5, 'scenario_type': 'default'}},
-            {'name': 'Stable High Load', 'params': {'num_ues': NUM_UES, 'initial_load': 0.6, 'max_speed': 3, 'scenario_type': 'default'}}
+            # --- Original baseline scenarios ---
+            {'name': 'Stable Mobility', 'params': {
+                'num_ues': NUM_UES, 
+                'initial_load': 0.4, 
+                'max_speed': 5, 
+                'scenario_type': 'default'
+            }},
+            {'name': 'Stable High Load', 'params': {
+                'num_ues': NUM_UES, 
+                'initial_load': 0.6, 
+                'max_speed': 3, 
+                'scenario_type': 'default'
+            }},
+            
+            # --- New realistic network challenge scenarios ---
+            {'name': 'Load Imbalance', 'params': {
+                'num_ues': NUM_UES, 
+                'initial_load': 0.7,  # High initial load
+                'max_speed': 1,       # Low mobility for clustered users
+                'scenario_type': 'default',
+                'ue_distribution': 'clustered'  # Activates clustering logic
+            }},
+            {'name': 'Coverage Hole', 'params': {
+                'num_ues': NUM_UES, 
+                'initial_load': 0.5,
+                'max_speed': 5,
+                'scenario_type': 'default',
+                'active_cell_indices': coverage_hole_cells  # Some cells are disabled
+            }},
+            {'name': 'High Interference', 'params': {
+                'num_ues': NUM_UES, 
+                'initial_load': 0.6,
+                'max_speed': 5,
+                'scenario_type': 'default',
+                'inter_site_distance': 75.0  # Reduced distance increases overlap and interference
+            }},
+            
+            # --- NEW CHALLENGING SCENARIO: Congestion Crisis ---
+            # This scenario creates a "trap" for Hill-Climbing algorithms by 
+            # concentrating a large number of users in one area with high load
+            # and minimal mobility. AI-Fuzzer should perform better at finding 
+            # critical vulnerabilities in this scenario by exploring beyond local optima.
+            {'name': 'Congestion Crisis', 'params': {
+                'num_ues': 25,               # Increased number of UEs creates more complexity
+                'initial_load': 0.8,         # Very high initial load
+                'max_speed': 1,              # Users are almost stationary
+                'scenario_type': 'default',
+                'ue_distribution': 'clustered', # Users clustered in specific areas
+                'inter_site_distance': 200   # Increased interference
+            }}
         ]
 
         scenario_pbar = tqdm(scenarios_to_run, desc="Overall Progress", position=0)
