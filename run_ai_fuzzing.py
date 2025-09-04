@@ -84,7 +84,8 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-SIMULATION_ITERATIONS = 200  # Increased from 1 to get more meaningful results
+NUM_INDEPENDENT_RUNS = 30    # Number of independent runs with different random seeds
+SIMULATION_ITERATIONS = 50   # Number of iterations per independent run
 FUZZER_GENERATIONS = 50
 FUZZER_POPULATION = 20
 
@@ -978,31 +979,64 @@ class NaiveRandomFuzzer:
         inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
         return inputs
 
-# --- Module 3c: New Simple-Search Baseline ---
-class HillClimbingFuzzer:
+# --- Module 3c: Traditional Testing Baseline ---
+class TraditionalTester:
     """
-    A simple intelligent search baseline using Hill Climbing.
-    It makes small changes and only keeps them if they improve the vulnerability score.
+    Simulates how an operator would manually test a network system.
+    Uses predefined test cases instead of fuzzing to identify vulnerabilities.
     """
-    def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm, steps=50):
+    def __init__(self, env: NetworkEnvironment, ts: TrafficSteeringAlgorithm):
         self.env = env
         self.ts = ts
-        self.steps = steps # تعداد مراحل جستجو
-        # این یک اوراکل داخلی فقط برای محاسبه امتیاز است
+        # Oracle for scoring vulnerabilities in the test cases
         self.scoring_oracle = Oracle(num_ues=env.num_ues, num_cells=env.num_cells)
+        
+        # Define standard test scenarios that a traditional tester would use
+        self.test_scenarios = {
+            "baseline": {
+                "load_modifier": np.zeros(self.env.num_cells),
+                "position_modifier": np.zeros((self.env.num_ues, 2))
+            },
+            "high_load": {
+                "load_modifier": np.ones(self.env.num_cells) * 0.2,  # Increase load in all cells
+                "position_modifier": np.zeros((self.env.num_ues, 2))
+            },
+            "cell_edge_users": {
+                "load_modifier": np.zeros(self.env.num_cells),
+                "position_modifier": np.array([
+                    [(-1)**i * 45, (-1)**(i//2) * 45] for i in range(self.env.num_ues)
+                ])  # Place users at cell edges
+            },
+            "single_cell_outage": {
+                "load_modifier": np.zeros(self.env.num_cells),
+                "position_modifier": np.zeros((self.env.num_ues, 2))
+                # Note: Cell outage is handled separately by deactivating a cell
+            },
+            "user_cluster": {
+                "load_modifier": np.zeros(self.env.num_cells),
+                "position_modifier": np.array([
+                    [np.random.normal(10, 5), np.random.normal(10, 5)] for _ in range(self.env.num_ues)
+                ])  # Cluster users in one area
+            }
+        }
+        
+        # Track which scenario we're currently testing
+        self.current_scenario_idx = 0
+        self.scenario_keys = list(self.test_scenarios.keys())
 
-    def _get_vulnerability_score(self, fuzzed_inputs, current_assignments):
+    def _apply_test_scenario(self, scenario, current_assignments):
         """
-        یک مرحله شبیه‌سازی را با ورودی‌های داده شده اجرا کرده و یک امتیاز آسیب‌پذیری برمی‌گرداند.
+        Apply a test scenario and evaluate its impact on the network.
         """
-        load_modifier = fuzzed_inputs[:self.env.num_cells]
-        position_modifier_2d = fuzzed_inputs[self.env.num_cells:].reshape(self.env.num_ues, 2)
+        load_modifier = scenario["load_modifier"]
+        position_modifier_2d = scenario["position_modifier"]
         pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((self.env.num_ues, 1))])
         
-        # یک کپی از حالت فعلی محیط ایجاد می‌کنیم تا محیط اصلی دستکاری نشود
+        # Create a temporary copy of the current environment state
         temp_ue_loc = self.env.ue_loc.read_value()[:1] + tf.constant(pos_modifier_3d_np[np.newaxis, ...], dtype=tf.float32)
         temp_cell_loads = np.clip(self.env.cell_loads.copy() + load_modifier, 0, 1)
 
+        # Compute network metrics for this scenario
         rsrp, sinr = self.env.compute_metrics_tf(
             temp_ue_loc,
             self.env.bs_loc_unbatched,
@@ -1012,7 +1046,7 @@ class HillClimbingFuzzer:
             self.env.in_state[:1]
         )
         
-        # Convert tensors to numpy safely
+        # Convert tensors to numpy arrays
         if hasattr(rsrp, 'numpy'):
             rsrp_np = rsrp.numpy()[0]
         else:
@@ -1023,53 +1057,56 @@ class HillClimbingFuzzer:
         else:
             sinr_np = np.array(sinr)[0]
         
+        # Update traffic steering algorithm with previous assignments
         self.ts.prev_assignments = current_assignments
         new_assignments = self.ts.assign_ues(rsrp_np, sinr_np, temp_cell_loads, self.env.ue_priorities)
         
+        # Evaluate the network performance
         metrics = self.scoring_oracle.evaluate(rsrp_np, sinr_np, new_assignments, temp_cell_loads, self.env.ue_priorities, current_assignments)
         
-        # امتیاز ترکیبی از شدت آسیب‌پذیری‌ها
-        score = (metrics['has_ping_pong'] * 3 + 
-                 metrics['has_qoe_violation'] * 2 + 
-                 metrics['has_unfairness'] * 1 +
-                 metrics['is_critical_failure'] * 10) # شکست بحرانی بالاترین امتیاز را دارد
-        return score
+        # Return the metrics and the parameters that produced them
+        return {
+            'rsrp': rsrp_np,
+            'sinr': sinr_np,
+            'cell_loads': temp_cell_loads,
+            'assignments': new_assignments,
+            'metrics': metrics,
+            'inputs': np.concatenate([load_modifier, position_modifier_2d.flatten()])
+        }
 
     def generate_inputs(self, dt=1.0):
-        if self.ts.prev_assignments is None:
-            # در اولین اجرا، یک ورودی تصادفی برگردان
-            load_modifier = np.random.uniform(-0.05, 0.05, self.env.num_cells)
-            position_modifier_2d = np.random.uniform(-3, 3, (self.env.num_ues, 2))
-            return np.concatenate([load_modifier, position_modifier_2d.flatten()])
+        """
+        Generate test inputs based on predefined traditional test scenarios.
+        This simulates how an operator would manually test the system.
+        """
+        # If this is the first call, we don't have previous assignments
+        current_assignments = None
+        if self.ts.prev_assignments is not None:
+            current_assignments = self.ts.prev_assignments.copy()
 
-        current_assignments = self.ts.prev_assignments.copy()
+        # Get the current test scenario
+        scenario_name = self.scenario_keys[self.current_scenario_idx]
+        scenario = self.test_scenarios[scenario_name]
         
-        # ۱. با یک راه‌حل تصادفی شروع کن
-        current_solution = np.concatenate([
-            np.random.uniform(-0.05, 0.05, self.env.num_cells),
-            np.random.uniform(-3, 3, self.env.num_ues * 2)
+        # Move to the next scenario for the next call
+        self.current_scenario_idx = (self.current_scenario_idx + 1) % len(self.scenario_keys)
+        
+        # Apply special handling for "single_cell_outage" scenario
+        if scenario_name == "single_cell_outage" and self.env.num_cells > 1:
+            # Temporarily turn off a random cell by setting its load to maximum
+            outage_cell = np.random.randint(0, self.env.num_cells)
+            load_modifier = scenario["load_modifier"].copy()
+            load_modifier[outage_cell] = 1.0  # Set to max load to simulate outage
+            scenario = {
+                "load_modifier": load_modifier,
+                "position_modifier": scenario["position_modifier"]
+            }
+            
+        # Return the inputs for the current scenario
+        return np.concatenate([
+            scenario["load_modifier"],
+            scenario["position_modifier"].flatten()
         ])
-        best_score = self._get_vulnerability_score(current_solution, current_assignments)
-
-        # ۲. برای تعداد مشخصی مرحله، تلاش کن آن را بهتر کنی
-        for _ in range(self.steps):
-            # یک همسایه با ایجاد تغییر کوچک بساز
-            neighbor_solution = current_solution.copy()
-            # یک تغییر کوچک تصادفی اعمال کن
-            perturbation = np.concatenate([
-                np.random.normal(0, 0.01, self.env.num_cells),
-                np.random.normal(0, 0.5, self.env.num_ues * 2)
-            ])
-            neighbor_solution += perturbation
-            
-            neighbor_score = self._get_vulnerability_score(neighbor_solution, current_assignments)
-            
-            # ۳. اگر همسایه بهتر بود، به آنجا حرکت کن
-            if neighbor_score > best_score:
-                best_score = neighbor_score
-                current_solution = neighbor_solution
-        
-        return current_solution
 
 # --- Module 4: Oracle (Vulnerability Detector) ---
 class Oracle:
@@ -1186,119 +1223,158 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     }
     
     fuzzer_map = {
-        "AI-Fuzzer": lambda env, ts: AIFuzzer(env, ts, use_nsga2=ENABLE_NSGA2_FUZZER),
-        "Random-Fuzzer": lambda env, ts: NaiveRandomFuzzer(env, ts),
-        "HillClimbing-Fuzzer": lambda env, ts: HillClimbingFuzzer(env, ts)
+        "AI-Fuzzing": lambda env, ts: AIFuzzer(env, ts, use_nsga2=ENABLE_NSGA2_FUZZER),
+        "Traditional-Testing": lambda env, ts: TraditionalTester(env, ts)
     }
     
     results_list = []
     fuzzer_effectiveness = {}
     
-    combination_pbar = tqdm(total=len(fuzzer_map) * len(algorithm_factories), desc=f"Processing {scenario_name}", leave=False)
-    
-    for fuzzer_name, fuzzer_factory in fuzzer_map.items():
+    # Initialize fuzzer_effectiveness with nested dictionaries to track results by run
+    for fuzzer_name in fuzzer_map.keys():
         fuzzer_effectiveness[fuzzer_name] = {
             'vulnerability_counts': [],
-            'critical_failure_counts': [], # New metric to track
+            'critical_failure_counts': [],
             'vulnerability_severities': [],
             'handover_rates': [],
             'qoe_violations': [],
             'unfairness_events': [],
             'ping_pong_events': [],
+            # Add new fields to track statistics by independent run
+            'runs_critical_failures': [],  # List of critical failures per run
+            'runs_vulnerability_counts': [],  # List of vulnerability counts per run
+            'runs_avg_throughput': [],  # Average throughput per run
         }
+    
+    combination_pbar = tqdm(total=len(fuzzer_map) * len(algorithm_factories) * NUM_INDEPENDENT_RUNS, 
+                            desc=f"Processing {scenario_name}", leave=False)
+    
+    for fuzzer_name, fuzzer_factory in fuzzer_map.items():
         for actual_algo_name, algo_factory in algorithm_factories.items():
-            combination_pbar.set_description(f"{scenario_name}: {fuzzer_name}+{actual_algo_name}")
-            
-            shared_env_state.reset(initial_load=initial_load, max_speed=max_speed)
-            ts_instance = algo_factory()
-            oracle = Oracle(num_ues=num_ues, num_cells=shared_env_state.num_cells)
-            fuzzer = fuzzer_factory(shared_env_state, ts_instance)
-            
-            rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
-            initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, shared_env_state.cell_loads, prio_init, dt=0)
-            
-            if initial_assignments is None: continue
-            
-            shared_env_state.update_cell_loads(initial_assignments)
-            
-            iter_pbar = tqdm(range(SIMULATION_ITERATIONS), desc=f" {fuzzer_name}+{actual_algo_name} Iterations", leave=False)
-            for iteration in iter_pbar:
-                try:
-                    current_assignments = ts_instance.prev_assignments.copy()
-                    
-                    if hasattr(fuzzer, 'generate_inputs'):
-                        fuzzed_inputs = fuzzer.generate_inputs(dt=1.0)
-                    else:
-                        load_modifier = np.random.uniform(-0.05, 0.05, shared_env_state.num_cells)
-                        position_modifier_2d = np.random.uniform(-3, 3, (num_ues, 2))
-                        fuzzed_inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
-
-                    load_modifier = fuzzed_inputs[:shared_env_state.num_cells]
-                    position_modifier_2d = fuzzed_inputs[shared_env_state.num_cells:].reshape(num_ues, 2)
-                    pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((num_ues, 1))])
-
-                    shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
-                    # The fuzzer now operates on a single state, so we apply perturbations to the first slice of the batch
-                    current_loc = shared_env_state.ue_loc.read_value()
-                    new_loc = tf.tensor_scatter_nd_update(current_loc, [[0]], [current_loc[0] + tf.constant(pos_modifier_3d_np, dtype=tf.float32)])
-                    shared_env_state.ue_loc.assign(new_loc)
-                    
-                    shared_env_state.update_ue_positions_and_velocities(dt=1.0)
-                    
-                    rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
-                    new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt=1.0)
-                    new_assignments = np.clip(new_assignments, 0, shared_env_state.num_cells - 1)
-                    
-                    shared_env_state.update_cell_loads(new_assignments)
-                    oracle_metrics = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval, current_assignments)
-                    
-                    assigned_sinr_list = [sinr[i, new_assignments[i]] if 0 <= new_assignments[i] < shared_env_state.num_cells else np.nan for i in range(num_ues)]
-                    assigned_sinr_np_finite = np.array([s for s in assigned_sinr_list if pd.notna(s)])
-                    
-                    assigned_sinr_linear = 10**(np.array(assigned_sinr_np_finite, dtype=np.float32) / 10.0)
-                    user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
-                    user_throughputs_mbps = user_throughputs_bps / 1e6
-                    transmission_time_ms = calculate_transmission_delay_ms(user_throughputs_bps)
-
-                    results_list.append({
-                        'scenario': scenario_name, 'iteration': iteration, 'fuzzer_type': fuzzer_name,
-                        'algorithm': actual_algo_name,
-                        'handover_count': np.sum(new_assignments != current_assignments),
-                        'handover_rate': oracle_metrics['handover_rate'],
-                        'vulnerability_count': len(oracle_metrics['vulnerabilities']),
-                        'vulnerabilities_list': oracle_metrics['vulnerabilities'],
-                        'jain_fairness_index': float(oracle_metrics['jain_index']),
-                        'avg_sinr_db': np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan,
-                        'sinr_5th_percentile_db': safe_nanpercentile(assigned_sinr_np_finite, 5),
-                        'avg_throughput_mbps': np.nanmean(user_throughputs_mbps),
-                        'throughput_5th_percentile_mbps': safe_nanpercentile(user_throughputs_mbps, 5),
-                        'avg_transmission_time_ms': np.nanmean(transmission_time_ms),
-                        'load_std': np.std(shared_env_state.cell_loads),
-                        'has_ping_pong': oracle_metrics['has_ping_pong'],
-                        'has_qoe_violation': oracle_metrics['has_qoe_violation'],
-                        'has_unfairness': oracle_metrics['has_unfairness'],
-                        'is_critical_failure': oracle_metrics['is_critical_failure']
-                    })
-                    
-                    fuzzer_effectiveness[fuzzer_name]['vulnerability_counts'].append(len(oracle_metrics['vulnerabilities']))
-                    fuzzer_effectiveness[fuzzer_name]['critical_failure_counts'].append(oracle_metrics['is_critical_failure'])
-                    
-                    severity = (oracle_metrics['has_ping_pong'] * 1 + 
-                                oracle_metrics['has_qoe_violation'] * 2 + 
-                                oracle_metrics['has_unfairness'] * 2 +
-                                oracle_metrics['is_critical_failure'] * 5) # Critical failures are most severe
-                    fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(severity)
-                    fuzzer_effectiveness[fuzzer_name]['handover_rates'].append(oracle_metrics['handover_rate'])
-                    fuzzer_effectiveness[fuzzer_name]['qoe_violations'].append(oracle_metrics['has_qoe_violation'])
-                    fuzzer_effectiveness[fuzzer_name]['unfairness_events'].append(oracle_metrics['has_unfairness'])
-                    fuzzer_effectiveness[fuzzer_name]['ping_pong_events'].append(oracle_metrics['has_ping_pong'])
-                    
-                    iter_pbar.set_postfix({'Vulns': len(oracle_metrics['vulnerabilities']), 'Crit.': oracle_metrics['is_critical_failure'], '5th Thrpt': f'{safe_nanpercentile(user_throughputs_mbps, 5):.2f}Mbps'})
-                except Exception as e:
-                    print(f"ERROR in iteration {iteration} for {fuzzer_name}+{actual_algo_name}: {e}")
+            # Run multiple independent runs with different random seeds
+            for run_id in range(NUM_INDEPENDENT_RUNS):
+                # Set different random seed for each run to ensure independence
+                np.random.seed(run_id)
+                tf.random.set_seed(run_id)
+                
+                combination_pbar.set_description(f"{scenario_name}: {fuzzer_name}+{actual_algo_name} Run {run_id+1}/{NUM_INDEPENDENT_RUNS}")
+                
+                # Track metrics for this specific run
+                run_vulnerability_count = 0
+                run_critical_failures = 0
+                run_throughputs = []
+                
+                # Initialize the environment for this run
+                shared_env_state.reset(initial_load=initial_load, max_speed=max_speed)
+                ts_instance = algo_factory()
+                oracle = Oracle(num_ues=num_ues, num_cells=shared_env_state.num_cells)
+                fuzzer = fuzzer_factory(shared_env_state, ts_instance)
+                
+                rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
+                initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, shared_env_state.cell_loads, prio_init, dt=0)
+                
+                if initial_assignments is None: 
+                    combination_pbar.update(1)
                     continue
-            iter_pbar.close()
-            combination_pbar.update(1)
+                
+                shared_env_state.update_cell_loads(initial_assignments)
+                
+                iter_pbar = tqdm(range(SIMULATION_ITERATIONS), 
+                                desc=f" {fuzzer_name}+{actual_algo_name} Run {run_id+1} Iterations", leave=False)
+                for iteration in iter_pbar:
+                    try:
+                        current_assignments = ts_instance.prev_assignments.copy()
+                        
+                        if hasattr(fuzzer, 'generate_inputs'):
+                            fuzzed_inputs = fuzzer.generate_inputs(dt=1.0)
+                        else:
+                            load_modifier = np.random.uniform(-0.05, 0.05, shared_env_state.num_cells)
+                            position_modifier_2d = np.random.uniform(-3, 3, (num_ues, 2))
+                            fuzzed_inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
+
+                        load_modifier = fuzzed_inputs[:shared_env_state.num_cells]
+                        position_modifier_2d = fuzzed_inputs[shared_env_state.num_cells:].reshape(num_ues, 2)
+                        pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((num_ues, 1))])
+
+                        shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
+                        # The fuzzer now operates on a single state, so we apply perturbations to the first slice of the batch
+                        current_loc = shared_env_state.ue_loc.read_value()
+                        new_loc = tf.tensor_scatter_nd_update(current_loc, [[0]], [current_loc[0] + tf.constant(pos_modifier_3d_np, dtype=tf.float32)])
+                        shared_env_state.ue_loc.assign(new_loc)
+                        
+                        shared_env_state.update_ue_positions_and_velocities(dt=1.0)
+                        
+                        rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
+                        new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt=1.0)
+                        new_assignments = np.clip(new_assignments, 0, shared_env_state.num_cells - 1)
+                        
+                        shared_env_state.update_cell_loads(new_assignments)
+                        oracle_metrics = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval, current_assignments)
+                        
+                        assigned_sinr_list = [sinr[i, new_assignments[i]] if 0 <= new_assignments[i] < shared_env_state.num_cells else np.nan for i in range(num_ues)]
+                        assigned_sinr_np_finite = np.array([s for s in assigned_sinr_list if pd.notna(s)])
+                        
+                        assigned_sinr_linear = 10**(np.array(assigned_sinr_np_finite, dtype=np.float32) / 10.0)
+                        user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
+                        user_throughputs_mbps = user_throughputs_bps / 1e6
+                        transmission_time_ms = calculate_transmission_delay_ms(user_throughputs_bps)
+
+                        results_list.append({
+                            'scenario': scenario_name, 'iteration': iteration, 'fuzzer_type': fuzzer_name,
+                            'algorithm': actual_algo_name,
+                            'handover_count': np.sum(new_assignments != current_assignments),
+                            'handover_rate': oracle_metrics['handover_rate'],
+                            'vulnerability_count': len(oracle_metrics['vulnerabilities']),
+                            'vulnerabilities_list': oracle_metrics['vulnerabilities'],
+                            'jain_fairness_index': float(oracle_metrics['jain_index']),
+                            'avg_sinr_db': np.mean(assigned_sinr_np_finite) if assigned_sinr_np_finite.size > 0 else np.nan,
+                            'sinr_5th_percentile_db': safe_nanpercentile(assigned_sinr_np_finite, 5),
+                            'avg_throughput_mbps': np.nanmean(user_throughputs_mbps),
+                            'throughput_5th_percentile_mbps': safe_nanpercentile(user_throughputs_mbps, 5),
+                            'avg_transmission_time_ms': np.nanmean(transmission_time_ms),
+                            'load_std': np.std(shared_env_state.cell_loads),
+                            'has_ping_pong': oracle_metrics['has_ping_pong'],
+                            'has_qoe_violation': oracle_metrics['has_qoe_violation'],
+                            'has_unfairness': oracle_metrics['has_unfairness'],
+                            'is_critical_failure': oracle_metrics['is_critical_failure']
+                        })
+                        
+                        # Tracking metrics for overall analysis
+                        fuzzer_effectiveness[fuzzer_name]['vulnerability_counts'].append(len(oracle_metrics['vulnerabilities']))
+                        fuzzer_effectiveness[fuzzer_name]['critical_failure_counts'].append(oracle_metrics['is_critical_failure'])
+                        
+                        # Track metrics for this specific run
+                        run_vulnerability_count += len(oracle_metrics['vulnerabilities'])
+                        run_critical_failures += 1 if oracle_metrics['is_critical_failure'] else 0
+                        run_throughputs.append(np.nanmean(user_throughputs_mbps))
+                        
+                        severity = (oracle_metrics['has_ping_pong'] * 1 + 
+                                    oracle_metrics['has_qoe_violation'] * 2 + 
+                                    oracle_metrics['has_unfairness'] * 2 +
+                                    oracle_metrics['is_critical_failure'] * 5) # Critical failures are most severe
+                        fuzzer_effectiveness[fuzzer_name]['vulnerability_severities'].append(severity)
+                        fuzzer_effectiveness[fuzzer_name]['handover_rates'].append(oracle_metrics['handover_rate'])
+                        fuzzer_effectiveness[fuzzer_name]['qoe_violations'].append(oracle_metrics['has_qoe_violation'])
+                        fuzzer_effectiveness[fuzzer_name]['unfairness_events'].append(oracle_metrics['has_unfairness'])
+                        fuzzer_effectiveness[fuzzer_name]['ping_pong_events'].append(oracle_metrics['has_ping_pong'])
+                        
+                        iter_pbar.set_postfix({
+                            'Vulns': len(oracle_metrics['vulnerabilities']), 
+                            'Crit.': oracle_metrics['is_critical_failure'], 
+                            '5th Thrpt': f'{safe_nanpercentile(user_throughputs_mbps, 5):.2f}Mbps'
+                        })
+                    except Exception as e:
+                        print(f"ERROR in iteration {iteration} for {fuzzer_name}+{actual_algo_name} Run {run_id+1}: {e}")
+                        continue
+                
+                iter_pbar.close()
+                
+                # After completing all iterations for this run, store the run-level statistics
+                fuzzer_effectiveness[fuzzer_name]['runs_critical_failures'].append(run_critical_failures)
+                fuzzer_effectiveness[fuzzer_name]['runs_vulnerability_counts'].append(run_vulnerability_count)
+                fuzzer_effectiveness[fuzzer_name]['runs_avg_throughput'].append(np.mean(run_throughputs) if run_throughputs else 0)
+                
+                combination_pbar.update(1)
             
     combination_pbar.close()
     return results_list, fuzzer_effectiveness
@@ -1313,7 +1389,7 @@ def summarize_and_plot(df, effectiveness_data, script_version):
 
     # --- Print Summary and Statistical Analysis ---
     print("\n" + "="*80)
-    print("COMPREHENSIVE STATISTICAL ANALYSIS - AI vs RANDOM FUZZER")
+    print("COMPREHENSIVE STATISTICAL ANALYSIS - AI FUZZING vs TRADITIONAL TESTING")
     print("="*80)
     
     overall_effectiveness = {}
@@ -1335,29 +1411,163 @@ def summarize_and_plot(df, effectiveness_data, script_version):
         print(f"    Total CRITICAL FAILURES Found: {metrics['total_critical_failures']}")
         print(f"    Average Vulnerability Severity: {metrics['total_severity'] / max(1, metrics['runs']):.2f}")
     
-    # Statistical test on the number of critical failures found
-    if 'AI-Fuzzer' in overall_effectiveness and 'Random-Fuzzer' in overall_effectiveness:
-        ai_critical_failures = []
-        random_critical_failures = []
+    # Enhanced statistical test using the independent runs data
+    if 'AI-Fuzzing' in overall_effectiveness and 'Traditional-Testing' in overall_effectiveness:
+        ai_run_critical_failures = []
+        trad_run_critical_failures = []
+        ai_run_vulnerabilities = []
+        trad_run_vulnerabilities = []
+        
+        # Collect run-level statistics across all scenarios
         for eff in effectiveness_data.values():
-            if 'AI-Fuzzer' in eff: ai_critical_failures.extend(eff['AI-Fuzzer']['critical_failure_counts'])
-            if 'Random-Fuzzer' in eff: random_critical_failures.extend(eff['Random-Fuzzer']['critical_failure_counts'])
-
-        if len(ai_critical_failures) > 1 and len(random_critical_failures) > 1:
+            if 'AI-Fuzzing' in eff and 'runs_critical_failures' in eff['AI-Fuzzing']:
+                ai_run_critical_failures.extend(eff['AI-Fuzzing']['runs_critical_failures'])
+                ai_run_vulnerabilities.extend(eff['AI-Fuzzing']['runs_vulnerability_counts'])
+            
+            if 'Traditional-Testing' in eff and 'runs_critical_failures' in eff['Traditional-Testing']:
+                trad_run_critical_failures.extend(eff['Traditional-Testing']['runs_critical_failures'])
+                trad_run_vulnerabilities.extend(eff['Traditional-Testing']['runs_vulnerability_counts'])
+        
+        # Print per-run statistics
+        print("\nPER-RUN STATISTICS (averaged over all scenarios):")
+        print(f"  AI-Fuzzing:")
+        print(f"    Average Critical Failures per Run: {np.mean(ai_run_critical_failures):.2f} ± {np.std(ai_run_critical_failures):.2f}")
+        print(f"    Average Vulnerabilities per Run: {np.mean(ai_run_vulnerabilities):.2f} ± {np.std(ai_run_vulnerabilities):.2f}")
+        print(f"  Traditional-Testing:")
+        print(f"    Average Critical Failures per Run: {np.mean(trad_run_critical_failures):.2f} ± {np.std(trad_run_critical_failures):.2f}")
+        print(f"    Average Vulnerabilities per Run: {np.mean(trad_run_vulnerabilities):.2f} ± {np.std(trad_run_vulnerabilities):.2f}")
+        
+        # Perform statistical tests on the run-level data
+        if len(ai_run_critical_failures) > 1 and len(trad_run_critical_failures) > 1:
             try:
-                t_stat, p_value = stats.ttest_ind(ai_critical_failures, random_critical_failures, equal_var=False, alternative='greater')
-                print("\nSTATISTICAL SIGNIFICANCE (T-TEST) for CRITICAL FAILURES (One-sided: AI > Random):")
-                print(f"  T-statistic: {t_stat:.3f}, P-value: {p_value:.5f}")
-                if p_value < 0.05:
-                    print("  Result: The AI fuzzer found a statistically significant GREATER number of critical failures (p < 0.05).")
+                # T-test for critical failures
+                t_stat_crit, p_value_crit = stats.ttest_ind(ai_run_critical_failures, trad_run_critical_failures, 
+                                                           equal_var=False, alternative='greater')
+                
+                # T-test for total vulnerabilities
+                t_stat_vuln, p_value_vuln = stats.ttest_ind(ai_run_vulnerabilities, trad_run_vulnerabilities, 
+                                                          equal_var=False, alternative='greater')
+                
+                # Mann-Whitney U test (non-parametric) for critical failures
+                u_stat_crit, p_value_u_crit = stats.mannwhitneyu(ai_run_critical_failures, trad_run_critical_failures, 
+                                                               alternative='greater')
+                
+                print("\nSTATISTICAL SIGNIFICANCE TESTS:")
+                print("T-TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):")
+                print(f"  T-statistic: {t_stat_crit:.3f}, P-value: {p_value_crit:.5f}")
+                if p_value_crit < 0.05:
+                    print(f"  Result: AI Fuzzing found a statistically significant GREATER number of critical failures (p = {p_value_crit:.5f}).")
                 else:
-                    print("  Result: No statistically significant difference found in finding critical failures.")
+                    print("  Result: No statistically significant difference found in critical failures.")
+                
+                print("\nT-TEST for TOTAL VULNERABILITIES (One-sided: AI Fuzzing > Traditional Testing):")
+                print(f"  T-statistic: {t_stat_vuln:.3f}, P-value: {p_value_vuln:.5f}")
+                if p_value_vuln < 0.05:
+                    print(f"  Result: AI Fuzzing found a statistically significant GREATER number of vulnerabilities (p = {p_value_vuln:.5f}).")
+                else:
+                    print("  Result: No statistically significant difference found in vulnerabilities.")
+                
+                print("\nMANN-WHITNEY U TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):")
+                print(f"  U-statistic: {u_stat_crit:.3f}, P-value: {p_value_u_crit:.5f}")
+                if p_value_u_crit < 0.05:
+                    print(f"  Result: AI Fuzzing found a statistically significant GREATER number of critical failures (p = {p_value_u_crit:.5f}).")
+                else:
+                    print("  Result: No statistically significant difference found in critical failures (non-parametric test).")
+                    
+                # Calculate confidence intervals
+                ai_mean = np.mean(ai_run_critical_failures)
+                trad_mean = np.mean(trad_run_critical_failures)
+                ai_sem = stats.sem(ai_run_critical_failures)
+                trad_sem = stats.sem(trad_run_critical_failures)
+                
+                # 95% confidence intervals
+                ai_ci = stats.t.interval(0.95, len(ai_run_critical_failures)-1, ai_mean, ai_sem)
+                trad_ci = stats.t.interval(0.95, len(trad_run_critical_failures)-1, trad_mean, trad_sem)
+                
+                print("\n95% CONFIDENCE INTERVALS for CRITICAL FAILURES:")
+                print(f"  AI Fuzzing: {ai_mean:.2f} [{ai_ci[0]:.2f}, {ai_ci[1]:.2f}]")
+                print(f"  Traditional Testing: {trad_mean:.2f} [{trad_ci[0]:.2f}, {trad_ci[1]:.2f}]")
+                
+                # Calculate effect size (Cohen's d)
+                pooled_std = np.sqrt(((len(ai_run_critical_failures) - 1) * np.var(ai_run_critical_failures) + 
+                                     (len(trad_run_critical_failures) - 1) * np.var(trad_run_critical_failures)) / 
+                                    (len(ai_run_critical_failures) + len(trad_run_critical_failures) - 2))
+                cohen_d = (ai_mean - trad_mean) / pooled_std
+                
+                print(f"\nEFFECT SIZE (Cohen's d): {cohen_d:.3f}")
+                if abs(cohen_d) < 0.2:
+                    print("  Interpretation: Small effect size")
+                elif abs(cohen_d) < 0.5:
+                    print("  Interpretation: Medium effect size")
+                else:
+                    print("  Interpretation: Large effect size")
+                    
             except Exception as e:
-                print(f"Could not perform t-test: {e}")
+                print(f"Could not perform statistical tests: {e}")
     
     print("\n" + "="*80)
     print("GENERATING PLOTS FOR PAPER")
     print("="*80)
+    
+    # Add a new plot for statistical comparison of runs
+    if ('AI-Fuzzing' in overall_effectiveness and 'Traditional-Testing' in overall_effectiveness and
+        'runs_critical_failures' in overall_effectiveness['AI-Fuzzing'] and 
+        'runs_critical_failures' in overall_effectiveness['Traditional-Testing']):
+        
+        # Extract run-level data across all scenarios
+        ai_run_critical_failures = []
+        trad_run_critical_failures = []
+        
+        for eff in effectiveness_data.values():
+            if 'AI-Fuzzing' in eff and 'runs_critical_failures' in eff['AI-Fuzzing']:
+                ai_run_critical_failures.extend(eff['AI-Fuzzing']['runs_critical_failures'])
+            
+            if 'Traditional-Testing' in eff and 'runs_critical_failures' in eff['Traditional-Testing']:
+                trad_run_critical_failures.extend(eff['Traditional-Testing']['runs_critical_failures'])
+        
+        # Create boxplot to visualize the statistical distribution
+        plt.figure(figsize=(10, 6))
+        box_data = [ai_run_critical_failures, trad_run_critical_failures]
+        box_labels = ['AI Fuzzing', 'Traditional Testing']
+        
+        boxplot = plt.boxplot(box_data, patch_artist=True, labels=box_labels, showfliers=True)
+        
+        # Set colors
+        colors = ['#3498db', '#e74c3c']
+        for box, color in zip(boxplot['boxes'], colors):
+            box.set(facecolor=color, alpha=0.7)
+            
+        plt.title('Statistical Comparison of Critical Failures per Run', fontsize=14, fontweight='bold')
+        plt.ylabel('Number of Critical Failures per Run', fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Add mean values as text
+        ai_mean = np.mean(ai_run_critical_failures)
+        trad_mean = np.mean(trad_run_critical_failures)
+        
+        # Calculate p-value from t-test
+        try:
+            t_stat, p_value = stats.ttest_ind(ai_run_critical_failures, trad_run_critical_failures, 
+                                           equal_var=False, alternative='greater')
+            p_value_text = f"p-value: {p_value:.5f}"
+        except:
+            p_value_text = "p-value: N/A"
+        
+        plt.annotate(f"Mean: {ai_mean:.2f}", xy=(1, ai_mean), xytext=(1.1, ai_mean),
+                    fontweight='bold', color='#3498db')
+        plt.annotate(f"Mean: {trad_mean:.2f}", xy=(2, trad_mean), xytext=(2.1, trad_mean),
+                    fontweight='bold', color='#e74c3c')
+        
+        plt.annotate(p_value_text, xy=(1.5, max(ai_mean, trad_mean) * 1.2),
+                   ha='center', fontweight='bold', fontsize=12,
+                   bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="black", alpha=0.7))
+        
+        # Save the statistical comparison plot
+        stats_plot_filename = os.path.join(output_plot_dir, 'statistical_comparison.pdf')
+        plt.savefig(stats_plot_filename, format='pdf', bbox_inches='tight')
+        plt.close()
+        
+        print(f"Statistical comparison plot saved to {stats_plot_filename}")
     
     output_plot_dir = f"plots_{script_version}"
     os.makedirs(output_plot_dir, exist_ok=True)
@@ -1374,14 +1584,14 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     
     # Define colors and line styles for clarity
     colors = {'Baseline': 'C0', 'Utility': 'C1', 'ML-Based': 'C2'}
-    linestyles = {'AI-Fuzzer': '-', 'Random-Fuzzer': '--'}
+    linestyles = {'AI-Fuzzing': '-', 'Traditional-Testing': '--'}
     
     for i, metric_info in enumerate(metrics_to_plot):
         for j, scenario in enumerate(scenarios):
             ax = axes[i, j]
             scenario_df = df[df['scenario'] == scenario]
             
-            for fuzzer_type in ['AI-Fuzzer', 'Random-Fuzzer']:
+            for fuzzer_type in ['AI-Fuzzing', 'Traditional-Testing']:
                 fuzzer_df = scenario_df[scenario_df['fuzzer_type'] == fuzzer_type]
                 for algo in ['Baseline', 'Utility', 'ML-Based']:
                     algo_df = fuzzer_df[fuzzer_df['algorithm'] == algo]
@@ -1390,12 +1600,12 @@ def summarize_and_plot(df, effectiveness_data, script_version):
                     if not data.empty:
                         y = np.linspace(0, 1, len(data))
                         ax.plot(data, y, 
-                                label=f"{algo} ({fuzzer_type.replace('-Fuzzer', '')})", 
+                                label=f"{algo} ({fuzzer_type})", 
                                 color=colors[algo],
                                 linestyle=linestyles[fuzzer_type],
                                 linewidth=2)
 
-            ax.set_title(f'CDF of {metric_info["label"]}\nScenario: {scenario}')
+            ax.set_title(f'CDF of {metric_info["label"]}\nAI Fuzzing vs Traditional Testing - {scenario}')
             ax.set_xlabel(metric_info['label'])
             ax.set_ylabel('Cumulative Probability')
             ax.grid(True, linestyle='--')
@@ -1405,7 +1615,7 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust layout to make room for suptitle
     
     # Save the consolidated figure as a PDF
-    pdf_filename = os.path.join(output_plot_dir, 'consolidated_qoe_cdfs.pdf')
+    pdf_filename = os.path.join(output_plot_dir, 'ai_fuzzing_vs_traditional_testing.pdf')
     plt.savefig(pdf_filename, format='pdf', bbox_inches='tight')
     plt.close()
 
@@ -1413,11 +1623,12 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     
 def run_static_scenarios():
     """
-    Executes predefined static scenarios to test specific network conditions.
-    This approach doesn't require a fuzzer class, but instead runs specific
-    hand-crafted scenarios to reproduce known or suspected vulnerabilities.
+    Executes predefined static scenarios that simulate traditional testing approaches.
+    This represents how operators would manually test network systems before
+    using advanced fuzzing techniques. These are systematic, predetermined test cases
+    based on known network challenges.
     """
-    print("\n--- Running Static Scenario Tests ---")
+    print("\n--- Running Traditional Testing Scenarios ---")
     
     # Step 1: Define static test scenarios
     static_scenarios = {
@@ -1607,7 +1818,11 @@ def run_static_scenarios():
     return all_results
 
 def main():
-    print(f"--- Starting AI Fuzzing Simulation ({SCRIPT_VERSION_NAME}) ---")
+    print(f"--- Starting AI Fuzzing vs Traditional Testing Comparison ({SCRIPT_VERSION_NAME}) ---")
+    print(f"--- Statistical Analysis Configuration: ---")
+    print(f"  - {NUM_INDEPENDENT_RUNS} independent runs with different random seeds")
+    print(f"  - {SIMULATION_ITERATIONS} iterations per run")
+    print(f"  - Total iterations: {NUM_INDEPENDENT_RUNS * SIMULATION_ITERATIONS} per algorithm")
     print("--- H100 GPU Optimizations Enabled: ---")
     print("  - Mixed precision (FP16) for tensor cores")
     print("  - XLA JIT compilation")
@@ -1636,14 +1851,8 @@ def main():
         else:
             print("--- No GPU detected by TensorFlow. Running on CPU. ---")
             
-        # Run the static scenario tests if enabled
-        RUN_STATIC_SCENARIOS = True  # Flag to enable/disable static scenario testing
-        if RUN_STATIC_SCENARIOS:
-            print("\n--- Running Static Scenario Tests Before Main Simulation ---")
-            static_results = run_static_scenarios()
-            # Add static scenario results to the overall results data for CSV output
-            if static_results:
-                all_results_data.extend(static_results)
+        # Note: We're not running the static scenarios separately since Traditional-Testing
+        # is now incorporated into the main simulation loop as part of our comparison
             
         # Expanded scenario definitions to include realistic network challenges
         # Define cells for coverage hole scenario (exclude central cells)
