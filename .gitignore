@@ -7,6 +7,7 @@ data/
 *.deb
 *.run
 *.pkl
+*.pyc
 
 # Ignore logs
 logs/
