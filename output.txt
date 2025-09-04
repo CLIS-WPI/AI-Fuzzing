@@ -1,0 +1,246 @@
+python3 run_ai_fuzzing.py 
+2025-09-03 18:01:20.918153: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-09-03 18:01:20.968836: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+GPU optimization configured for 1 devices
+--- Starting AI Fuzzing Simulation (v28_strategic_fuzzing) ---
+--- H100 GPU Optimizations Enabled: ---
+  - Mixed precision (FP16) for tensor cores
+  - XLA JIT compilation
+Could not set memory limit, using dynamic growth.
+--- GPU configuration successful ---
+
+--- Running Static Scenario Tests Before Main Simulation ---
+
+--- Running Static Scenario Tests ---
+
+--- Running Static Scenario: ping_pong_test ---
+Description: A user is placed exactly at the border between two cells to test ping-pong handovers
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1756936883.611830   49545 gpu_device.cc:2020] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 92981 MB memory:  -> device: 0, name: NVIDIA H100 NVL, pci bus id: 0000:43:00.0, compute capability: 9.0
+Testing Baseline algorithm...
+I0000 00:00:1756936889.488555   49545 auto_mixed_precision.cc:1511] No allowlist ops found, nothing to do
+2025-09-03 18:01:31.561828: I external/local_xla/xla/service/service.cc:163] XLA service 0x18ec4ed0 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+2025-09-03 18:01:31.561858: I external/local_xla/xla/service/service.cc:171]   StreamExecutor device (0): NVIDIA H100 NVL, Compute Capability 9.0
+2025-09-03 18:01:31.774878: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
+2025-09-03 18:01:31.775730: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
+2025-09-03 18:01:31.775758: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
+2025-09-03 18:01:31.775782: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
+2025-09-03 18:01:31.775989: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
+2025-09-03 18:01:31.776013: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
+2025-09-03 18:01:31.780081: I tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.cc:269] disabling MLIR crash reproducer, set env var `MLIR_CRASH_REPRODUCER_DIRECTORY` to enable.
+2025-09-03 18:01:32.659017: I external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:473] Loaded cuDNN version 90701
+2025-09-03 18:01:43.078078: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+I0000 00:00:1756936903.146854   49545 device_compiler.h:196] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+  Iteration 0: No vulnerabilities detected
+  Iteration 1: No vulnerabilities detected
+  Iteration 2: No vulnerabilities detected
+  Iteration 3: No vulnerabilities detected
+  Iteration 4: No vulnerabilities detected
+Testing Utility algorithm...
+  Iteration 0: No vulnerabilities detected
+  Iteration 1: No vulnerabilities detected
+  Iteration 2: No vulnerabilities detected
+  Iteration 3: No vulnerabilities detected
+  Iteration 4: No vulnerabilities detected
+Testing ML-Based algorithm...
+  Iteration 0: 1 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 1: 1 vulnerabilities found: Ping-Pong detected
+  Iteration 2: 1 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 3: 1 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 4: 3 vulnerabilities found: Ping-Pong: 2 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.16
+
+--- Running Static Scenario: load_imbalance_test ---
+Description: Most users concentrated in one cell to test load balancing
+Testing Baseline algorithm...
+2025-09-03 18:01:45.517390: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
+2025-09-03 18:01:45.518267: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
+2025-09-03 18:01:45.518296: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
+2025-09-03 18:01:45.518321: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
+2025-09-03 18:01:45.518538: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
+2025-09-03 18:01:45.518561: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
+2025-09-03 18:01:56.953951: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+  Iteration 0: No vulnerabilities detected
+  Iteration 1: No vulnerabilities detected
+  Iteration 2: No vulnerabilities detected
+  Iteration 3: 1 vulnerabilities found: Ping-Pong: 2 UEs oscillating
+  Iteration 4: 1 vulnerabilities found: Ping-Pong: 2 UEs oscillating
+Testing Utility algorithm...
+  Iteration 0: 1 vulnerabilities found: Ping-Pong detected
+  Iteration 1: 1 vulnerabilities found: Ping-Pong detected
+  Iteration 2: 1 vulnerabilities found: Ping-Pong: 2 UEs oscillating
+  Iteration 3: 1 vulnerabilities found: Ping-Pong: 2 UEs oscillating
+  Iteration 4: 1 vulnerabilities found: Ping-Pong detected
+Testing ML-Based algorithm...
+  Iteration 0: 1 vulnerabilities found: Ping-Pong detected
+  Iteration 1: 1 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 2: 2 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.16
+  Iteration 3: 2 vulnerabilities found: Ping-Pong: 3 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 4: 3 vulnerabilities found: Ping-Pong: 7 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.15
+
+--- Running Static Scenario: coverage_hole_test ---
+Description: Central cell is powered down to test network resilience
+Testing Baseline algorithm...
+2025-09-03 18:01:59.685954: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
+2025-09-03 18:01:59.686861: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
+2025-09-03 18:01:59.686892: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
+2025-09-03 18:01:59.686916: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
+2025-09-03 18:01:59.687131: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
+2025-09-03 18:01:59.687156: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
+2025-09-03 18:02:10.682618: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_multiply_reduce_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_complex_fusion', 8 bytes spill stores, 8 bytes spill loads
+
+  Iteration 0: No vulnerabilities detected
+  Iteration 1: 1 vulnerabilities found: Unfairness: Jain Index = 0.17
+  Iteration 2: 1 vulnerabilities found: Unfairness: Jain Index = 0.16
+  Iteration 3: 1 vulnerabilities found: Ping-Pong: 5 UEs oscillating
+  Iteration 4: 1 vulnerabilities found: Unfairness: Jain Index = 0.17
+Testing Utility algorithm...
+  Iteration 0: 2 vulnerabilities found: Ping-Pong: 2 UEs oscillating, Unfairness: Jain Index = 0.17
+  Iteration 1: 2 vulnerabilities found: Ping-Pong: 2 UEs oscillating, Unfairness: Jain Index = 0.15
+  Iteration 2: 2 vulnerabilities found: Ping-Pong: 6 UEs oscillating, Unfairness: Jain Index = 0.18
+  Iteration 3: 1 vulnerabilities found: Ping-Pong: 5 UEs oscillating
+  Iteration 4: 1 vulnerabilities found: Ping-Pong: 2 UEs oscillating
+Testing ML-Based algorithm...
+  Iteration 0: 2 vulnerabilities found: Ping-Pong: 2 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 1: 3 vulnerabilities found: Ping-Pong: 5 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.11
+  Iteration 2: 3 vulnerabilities found: Ping-Pong: 2 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.13
+  Iteration 3: 2 vulnerabilities found: Ping-Pong: 2 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 4: 1 vulnerabilities found: QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+
+--- Running Static Scenario: high_mobility_test ---
+Description: Test high mobility scenario with faster moving UEs
+Testing Baseline algorithm...
+2025-09-03 18:02:13.023386: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
+2025-09-03 18:02:13.024269: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
+2025-09-03 18:02:24.310898: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+  Iteration 0: No vulnerabilities detected
+  Iteration 1: 1 vulnerabilities found: Unfairness: Jain Index = 0.10
+  Iteration 2: No vulnerabilities detected
+  Iteration 3: 2 vulnerabilities found: Ping-Pong: 3 UEs oscillating, Unfairness: Jain Index = 0.19
+  Iteration 4: 1 vulnerabilities found: Ping-Pong: 4 UEs oscillating
+Testing Utility algorithm...
+  Iteration 0: 2 vulnerabilities found: Ping-Pong: 6 UEs oscillating, Unfairness: Jain Index = 0.16
+  Iteration 1: 2 vulnerabilities found: Ping-Pong: 4 UEs oscillating, Unfairness: Jain Index = 0.16
+  Iteration 2: 1 vulnerabilities found: Ping-Pong: 3 UEs oscillating
+  Iteration 3: 1 vulnerabilities found: Unfairness: Jain Index = 0.13
+  Iteration 4: 2 vulnerabilities found: Ping-Pong: 2 UEs oscillating, Unfairness: Jain Index = 0.16
+Testing ML-Based algorithm...
+  Iteration 0: 2 vulnerabilities found: Ping-Pong: 4 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps
+  Iteration 1: 3 vulnerabilities found: Ping-Pong: 4 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.08
+  Iteration 2: 3 vulnerabilities found: Ping-Pong: 2 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.07
+  Iteration 3: 3 vulnerabilities found: Ping-Pong: 4 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.09
+  Iteration 4: 3 vulnerabilities found: Ping-Pong: 4 UEs oscillating, QoS Violation: 5th Percentile Throughput = 1.88 Mbps, Unfairness: Jain Index = 0.10
+
+--- Static Scenarios Summary ---
+ping_pong_test, Baseline: Found 0 vulnerabilities, 0 critical failures
+ping_pong_test, Utility: Found 0 vulnerabilities, 0 critical failures
+ping_pong_test, ML-Based: Found 8 vulnerabilities, 0 critical failures
+load_imbalance_test, Baseline: Found 2 vulnerabilities, 0 critical failures
+load_imbalance_test, Utility: Found 5 vulnerabilities, 0 critical failures
+load_imbalance_test, ML-Based: Found 11 vulnerabilities, 0 critical failures
+coverage_hole_test, Baseline: Found 5 vulnerabilities, 0 critical failures
+coverage_hole_test, Utility: Found 8 vulnerabilities, 0 critical failures
+coverage_hole_test, ML-Based: Found 12 vulnerabilities, 0 critical failures
+high_mobility_test, Baseline: Found 4 vulnerabilities, 0 critical failures
+high_mobility_test, Utility: Found 9 vulnerabilities, 0 critical failures
+high_mobility_test, ML-Based: Found 14 vulnerabilities, 0 critical failures
+Running: Stable Mobility:   0%|                    | 0/6 [00:00<?, ?it/s]
+--- Running Scenario: Stable Mobility ---
+                                                                        2025-09-03 18:02:38.292771: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+                                                                        2025-09-03 18:02:55.858029: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_multiply_sqrt_fusion', 24 bytes spill stores, 24 bytes spill loads
+
+Running: Stable High Load:  17%|█▎      | 1/6 [15:21<1:16:49, 921.92s/it]
+--- Running Scenario: Stable High Load ---                               
+                                                                        2025-09-03 18:18:00.161989: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+                                                                        2025-09-03 18:18:17.845841: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_multiply_sqrt_fusion', 24 bytes spill stores, 24 bytes spill loads
+
+Running: Load Imbalance:  33%|███▎      | 2/6 [30:39<1:01:16, 919.16s/it]
+--- Running Scenario: Load Imbalance ---                                 
+                                                                        2025-09-03 18:33:17.016863: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+                                                                        2025-09-03 18:33:34.700980: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_multiply_sqrt_fusion', 24 bytes spill stores, 24 bytes spill loads
+
+Running: Coverage Hole:  50%|██████▌      | 3/6 [46:01<46:02, 920.84s/it]
+--- Running Scenario: Coverage Hole ---                                  
+                                                                        2025-09-03 18:48:40.319750: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_log_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_fusion_1', 16 bytes spill stores, 16 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_complex_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion_1', 16 bytes spill stores, 4 bytes spill loads
+
+                                                                        2025-09-03 18:48:58.286298: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_add_subtract_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 4 bytes spill stores, 4 bytes spill loads
+
+Running: High Interference:  67%|████▋  | 4/6 [1:01:11<30:32, 916.32s/it]
+--- Running Scenario: High Interference ---                              
+                                                                        2025-09-03 19:03:49.021444: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 24 bytes spill stores, 28 bytes spill loads
+
+                                                                        2025-09-03 19:04:06.749049: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_multiply_sqrt_fusion', 24 bytes spill stores, 24 bytes spill loads
+
+Running: Congestion Crisis:  83%|█████▊ | 5/6 [1:16:39<15:20, 920.43s/it]
+--- Running Scenario: Congestion Crisis ---                              
+                                                                        2025-09-03 19:19:17.130767: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_4', 4 bytes spill stores, 4 bytes spill loads
+
+                                                                        2025-09-03 19:19:35.499602: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_atan2_cosine_multiply_fusion', 8 bytes spill stores, 8 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'loop_multiply_sine_fusion', 4 bytes spill stores, 4 bytes spill loads
+ptxas warning : Registers are spilled to local memory in function 'input_transpose_fusion_1', 8 bytes spill stores, 8 bytes spill loads
+
+Running: Congestion Crisis: 100%|███████| 6/6 [1:34:34<00:00, 945.75s/it]
+                                                                         
+--- Finalizing script: Saving results... ---                             
+                                                                         
+--- Results saved to fuzzing_results_v28_strategic_fuzzing.csv ---
+
+================================================================================
+COMPREHENSIVE STATISTICAL ANALYSIS - AI vs RANDOM FUZZER
+================================================================================
+
+OVERALL FUZZER EFFECTIVENESS ACROSS ALL SCENARIOS:
+  AI-Fuzzer:
+    Total Vulnerabilities Found: 7606
+    Total CRITICAL FAILURES Found: 804
+    Average Vulnerability Severity: 4.08
+  Random-Fuzzer:
+    Total Vulnerabilities Found: 6524
+    Total CRITICAL FAILURES Found: 584
+    Average Vulnerability Severity: 3.51
+  HillClimbing-Fuzzer:
+    Total Vulnerabilities Found: 6344
+    Total CRITICAL FAILURES Found: 454
+    Average Vulnerability Severity: 3.27
+
+STATISTICAL SIGNIFICANCE (T-TEST) for CRITICAL FAILURES (One-sided: AI > Random):
+  T-statistic: 6.591, P-value: 0.00000
+  Result: The AI fuzzer found a statistically significant GREATER number of critical failures (p < 0.05).
+
+================================================================================
+GENERATING PLOTS FOR PAPER
+================================================================================
+Consolidated 2x2 plot saved to plots_v28_strategic_fuzzing/consolidated_qoe_cdfs.pdf
+
+--- Simulation Finished in 5736.85 seconds ---
+root@9800dbb53c38:/workspace# 

@@ -1,4 +1,0 @@
-fuzzer_type,Total Critical,Avg Critical,Total Vulns,Avg Vulns,Avg Handover Rate,Avg 5th Percentile Throughput,Avg Fairness
-AI-Fuzzer (NSGA-II),163,0.181,1533,1.703,0.582,9.23,0.264
-Hill Climbing,98,0.109,1333,1.481,0.515,13.053,0.359
-Random,56,0.062,1377,1.53,0.496,11.645,0.315
