@@ -7,3 +7,9 @@ pandas
 # Matplotlib is used for plotting the results
 matplotlib
 scipy
+
+# DEAP for Distributed Evolutionary Algorithms in Python
+deap
+
+# Optional: NetworkX for network visualization if needed
+networkx

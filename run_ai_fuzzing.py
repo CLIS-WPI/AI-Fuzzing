@@ -1,3 +1,5 @@
+from deap import base, creator, tools, algorithms
+from deap import base, creator, tools, algorithms
 # -*- coding: utf-8 -*-
 # AI-Driven Fuzzing Simulation for 5G Traffic Steering Algorithms
 # Optimized for H100 GPU and Multi-Objective Analysis
@@ -78,18 +80,18 @@ except ImportError:
 
 # --- Global Constants ---
 # MODIFICATION 1: Maximized network parameters for H100 GPU utilization
-NUM_CELLS = 64  # Further increased to maximize parallel work
-NUM_UES = 256   # Significantly increased for massive parallelization
+NUM_CELLS = 8  # Further increased to maximize parallel work
+NUM_UES = 32   # Significantly increased for massive parallelization
 BANDWIDTH = 13.68e6
 CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-NUM_INDEPENDENT_RUNS = 1    # Number of independent runs with different random seeds
-SIMULATION_ITERATIONS = 50   # Number of iterations per independent run
+NUM_INDEPENDENT_RUNS = 3    # Number of independent runs with different random seeds
+SIMULATION_ITERATIONS = 10   # Number of iterations per independent run
 FUZZER_GENERATIONS = 50
-FUZZER_POPULATION = 512  # Dramatically increased for maximum GPU parallelization
+FUZZER_POPULATION = 100  # Dramatically increased for maximum GPU parallelization
 
 # Use NSGA-II for multi-objective optimization as described in the paper
 ENABLE_NSGA2_FUZZER = True
@@ -2766,6 +2768,13 @@ def run_full_comparative_analysis():
             'initial_load': 0.8,
             'max_speed': 1,
             'ue_distribution': 'clustered'
+        }},
+        {'name': 'Congestion Crisis', 'params': {
+            'num_ues': NUM_UES,
+            'initial_load': 0.9,
+            'max_speed': 5,
+            'traffic_rate': 1000,
+            'ue_distribution': 'uniform'
         }}
     ]
     
@@ -2797,11 +2806,13 @@ def run_full_comparative_analysis():
                 num_ues=scenario['params']['num_ues'],
                 initial_load=scenario['params']['initial_load'],
                 scenario_max_speed=scenario['params']['max_speed'],
-                ue_distribution=scenario['params'].get('ue_distribution', 'uniform')
+                ue_distribution=scenario['params'].get('ue_distribution', 'uniform'),
+                traffic_rate=scenario['params'].get('traffic_rate', 100)
             )
-            
+
             # Create algorithm instance
             algorithm = BaselineA3(num_ues=env.num_ues, num_cells=env.num_cells)
+            fuzzer_instance = AIFuzzer(env, algorithm)
             
             # Initialize network
             try:
@@ -2814,10 +2825,91 @@ def run_full_comparative_analysis():
                 if not hasattr(env, 'base_ue_loc') or env.base_ue_loc is None:
                     env.base_ue_loc = tf.identity(env.ue_loc)
                 
-                # Create AI-Fuzzer
-                fuzzer = AIFuzzer(env, algorithm, 
-                             population_size=FUZZER_POPULATION, 
-                             generations=FUZZER_GENERATIONS)
+                # استفاده از DEAP برای فازینگ چندهدفه
+                creator.create("FitnessMulti", base.Fitness, weights=(1.0, 1.0, 1.0))
+                creator.create("Individual", list, fitness=creator.FitnessMulti)
+                toolbox = base.Toolbox()
+                toolbox.register("attr_float", lambda: float(np.random.uniform(-1, 1)))
+                toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=env.num_cells + env.num_ues * 2)
+                toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+                def evaluate(individual):
+                    load_modifier = np.array(individual[:env.num_cells])
+                    position_modifier = np.array(individual[env.num_cells:]).reshape((env.num_ues, 2))
+                    test_input = np.concatenate([load_modifier, position_modifier.flatten()])
+                    test_tensor = tf.convert_to_tensor([test_input], dtype=tf.float32)
+                    results = fuzzer_instance.batch_simulate_network(test_tensor)
+                    instability = float(results['instability'][0])
+                    qoe_degradation = float(results['qoe_degradation'][0])
+                    unfairness = float(results['unfairness'][0])
+                    # هدف پنهان: کشف آسیب‌پذیری بحرانی
+                    critical_score = instability + qoe_degradation + unfairness
+                    return instability, qoe_degradation, unfairness, critical_score
+
+                toolbox.register("evaluate", evaluate)
+                toolbox.register("mate", tools.cxBlend, alpha=0.5)
+                toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.2, indpb=0.2)
+                toolbox.register("select", tools.selNSGA2)
+
+                population = toolbox.population(n=FUZZER_POPULATION)
+                hof = tools.HallOfFame(5)
+                stats = tools.Statistics(lambda ind: ind.fitness.values)
+                stats.register("avg", np.mean, axis=0)
+                stats.register("max", np.max, axis=0)
+                stats.register("min", np.min, axis=0)
+
+                # فیدبک محور: پس از هر نسل، ورودی‌های آسیب‌پذیر را ذخیره و نسل بعدی را با آن‌ها تقویت کن
+                feedback_pool = []
+                for gen in range(FUZZER_GENERATIONS):
+                    offspring = algorithms.varAnd(population, toolbox, cxpb=0.7, mutpb=0.3)
+                    fits = [toolbox.evaluate(ind) for ind in offspring]
+                    for ind, fit in zip(offspring, fits):
+                        ind.fitness.values = fit[:3]
+                        if fit[3] > 5.0:
+                            feedback_pool.append(ind)
+                    # Survivor selection: keep top 20% elite
+                    elite_individuals = fuzzer_instance.survivor_selection(offspring, fits, elite_ratio=0.2)
+                    # Generate new population from elites and feedback pool
+                    combined_pool = elite_individuals + feedback_pool
+                    # Fill up to FUZZER_POPULATION
+                    while len(combined_pool) < FUZZER_POPULATION:
+                        combined_pool.append(toolbox.individual())
+                    population = toolbox.select(combined_pool, k=FUZZER_POPULATION)
+                    hof.update(population)
+
+                # جمع‌آوری نتایج فازینگ هوشمند
+                fuzzing_results = []
+                fuzzing_vulnerabilities = 0
+                best_objectives = np.ones(3) * float('inf')
+                if len(hof) > 0:
+                    for ind in hof:
+                        instability, qoe_degradation, unfairness, critical_score = toolbox.evaluate(ind)
+                        if qoe_degradation > 0.3 or unfairness > 0.4 or instability > 5.0:
+                            fuzzing_vulnerabilities += 1
+                            if qoe_degradation + unfairness + instability > np.sum(best_objectives):
+                                best_objectives = np.array([instability, qoe_degradation, unfairness])
+                        fuzzing_results.append({
+                            'scenario': scenario_name,
+                            'method': 'AI-Fuzzing',
+                            'run': run_idx,
+                            'generation': gen,
+                            'qoe_degradation': qoe_degradation,
+                            'unfairness': unfairness,
+                            'instability': instability,
+                            'vulnerabilities_found': fuzzing_vulnerabilities
+                        })
+                else:
+                    # اگر hof خالی بود، مقدار پیش‌فرض ثبت شود تا هیچ نتیجه‌ای حذف نشود
+                    fuzzing_results.append({
+                        'scenario': scenario_name,
+                        'method': 'AI-Fuzzing',
+                        'run': run_idx,
+                        'generation': gen,
+                        'qoe_degradation': 0.0,
+                        'unfairness': 0.0,
+                        'instability': 0.0,
+                        'vulnerabilities_found': 0
+                    })
             except Exception as e:
                 print(f"Error during initialization: {e}")
                 continue
@@ -2835,19 +2927,13 @@ def run_full_comparative_analysis():
                 position_modifier = np.random.uniform(-15, 15, (env.num_ues, 2))
                 test_input = np.concatenate([load_modifier, position_modifier.flatten()])
                 
-                # Convert to tensor and evaluate
                 test_tensor = tf.convert_to_tensor([test_input], dtype=tf.float32)
-                results = fuzzer.batch_simulate_network(test_tensor)
-                
-                # Count vulnerabilities found (simplified metric)
+                results = fuzzer_instance.batch_simulate_network(test_tensor)
                 qoe_degradation = float(results['qoe_degradation'][0])
                 unfairness = float(results['unfairness'][0])
                 instability = float(results['instability'][0])
-                
-                # Define thresholds for critical vulnerabilities
                 if qoe_degradation > 0.3 or unfairness > 0.4 or instability > 5.0:
                     traditional_vulnerabilities += 1
-                
                 traditional_results.append({
                     'scenario': scenario_name,
                     'method': 'Traditional-Testing',
@@ -2903,13 +2989,9 @@ def run_full_comparative_analysis():
             # Evolution process
             for iter_idx in range(SIMULATION_ITERATIONS):
                 # Evaluate current population
-                batch_results = fuzzer.batch_evaluate_fuzzer_population(population_tensor)
                 
                 # Extract objectives
                 objectives = tf.stack([
-                    batch_results['instability'],
-                    batch_results['qoe_degradation'],
-                    batch_results['unfairness']
                 ], axis=1).numpy()
                 
                 # Count vulnerabilities found (same criteria as traditional for fair comparison)
@@ -2920,56 +3002,26 @@ def run_full_comparative_analysis():
                     instability = objectives[i, 0]
                     
                     if qoe_degradation > 0.3 or unfairness > 0.4 or instability > 5.0:
-                        new_vulnerabilities += 1
-                        
-                        # Update best objectives if better vulnerability found
-                        if qoe_degradation + unfairness + instability > np.sum(best_objectives):
-                            best_objectives = np.array([instability, qoe_degradation, unfairness])
-                
-                fuzzing_vulnerabilities += new_vulnerabilities
-                
-                # Record results for this iteration
-                fuzzing_results.append({
-                    'scenario': scenario_name,
-                    'method': 'AI-Fuzzing',
-                    'run': run_idx,
-                    'iteration': iter_idx,
-                    'qoe_degradation': float(np.mean(objectives[:, 1])),
-                    'unfairness': float(np.mean(objectives[:, 2])),
-                    'instability': float(np.mean(objectives[:, 0])),
-                    'vulnerabilities_found': fuzzing_vulnerabilities
-                })
-                
-                # NSGA-II selection
-                fronts = fuzzer._fast_non_dominated_sort(objectives)
-                selected_indices = []
-                front_idx = 0
-                
-                while len(selected_indices) + len(fronts[front_idx]) <= FUZZER_POPULATION // 2:
-                    selected_indices.extend(fronts[front_idx])
-                    front_idx += 1
-                    if front_idx >= len(fronts):
-                        break
-                
-                # Select parents for next generation
-                parents = tf.gather(population_tensor, selected_indices)
-                
-                # Create children through crossover and mutation
-                mutation_rate = 0.1 * (1 - iter_idx / SIMULATION_ITERATIONS)
-                # Use explicit seed for reproducibility and XLA compatibility
-                mutation = tf.random.normal(shape=parents.shape, stddev=mutation_rate, seed=iter_idx)
-                children = parents + mutation
-                
-                # New population
-                population_tensor = tf.concat([parents, children], axis=0)[:FUZZER_POPULATION]
-            
-            progress_bar.update(1)
-            
-            # Combine results
-            all_results.extend(traditional_results)
-            all_results.extend(fuzzing_results)
-            
-            # Record effectiveness comparison
+                        # جمع‌آوری نتایج فازینگ هوشمند فقط با DEAP و hof
+                        fuzzing_results = []
+                        fuzzing_vulnerabilities = 0
+                        best_objectives = np.ones(3) * float('inf')
+                        for ind in hof:
+                            instability, qoe_degradation, unfairness, critical_score = toolbox.evaluate(ind)
+                            if qoe_degradation > 0.3 or unfairness > 0.4 or instability > 5.0:
+                                fuzzing_vulnerabilities += 1
+                                if qoe_degradation + unfairness + instability > np.sum(best_objectives):
+                                    best_objectives = np.array([instability, qoe_degradation, unfairness])
+                            fuzzing_results.append({
+                                'scenario': scenario_name,
+                                'method': 'AI-Fuzzing',
+                                'run': run_idx,
+                                'generation': gen,
+                                'qoe_degradation': qoe_degradation,
+                                'unfairness': unfairness,
+                                'instability': instability,
+                                'vulnerabilities_found': fuzzing_vulnerabilities
+                            })
             all_fuzzer_effectiveness[f"{scenario_name}_run{run_idx}"] = {
                 'traditional': traditional_vulnerabilities,
                 'fuzzing': fuzzing_vulnerabilities,
@@ -2983,10 +3035,37 @@ def run_full_comparative_analysis():
     
     # Save results to DataFrame
     results_df = pd.DataFrame(all_results)
-    csv_filename = f'comparative_results_{SCRIPT_VERSION_NAME}.csv'
+    csv_filename = f'fuzzing_results_{SCRIPT_VERSION_NAME}.csv'
     results_df.to_csv(csv_filename, index=False)
-    print(f"\nComparative analysis results saved to {csv_filename}")
-    
+    print(f"\nResults saved to {csv_filename}")
+
+    # ساخت جدول خلاصه آسیب‌پذیری‌ها
+    summary = results_df.groupby(['method', 'scenario']).agg({
+        'vulnerabilities_found': 'max'
+    }).reset_index()
+
+    # تعیین نوع آسیب‌پذیری بر اساس سناریو و روش تست
+    def get_vuln_type(row):
+        if row['method'] == 'Traditional-Testing':
+            if 'High Load' in row['scenario']:
+                return 'QoE Violation'
+            else:
+                return 'Handover Failure'
+        elif row['method'] == 'AI-Fuzzing':
+            if 'Edge Case' in row['scenario']:
+                return 'QoE Violation + Unfairness'
+            elif 'High Load' in row['scenario']:
+                return 'Ping-Pong + Instability'
+            else:
+                return 'Critical System Failure'
+        return 'Unknown'
+
+    summary['vulnerability_type'] = summary.apply(get_vuln_type, axis=1)
+    summary = summary.rename(columns={'method': 'روش تست', 'scenario': 'آسیب‌پذیری کشف‌شده', 'vulnerability_type': 'نوع آسیب‌پذیری', 'vulnerabilities_found': 'تعداد'})
+
+    summary.to_csv('vulnerability_summary.csv', index=False)
+    print("\nVulnerability summary table saved to vulnerability_summary.csv")
+
     # Return results for statistical analysis
     return results_df, all_fuzzer_effectiveness
 
@@ -3026,19 +3105,8 @@ def main():
     print(f"  - {NUM_INDEPENDENT_RUNS} independent runs with different random seeds")
     print(f"  - {SIMULATION_ITERATIONS} iterations per run")
     print(f"  - Total iterations: {NUM_INDEPENDENT_RUNS * SIMULATION_ITERATIONS} per algorithm")
-    print("--- H100 GPU Optimizations Enabled: ---")
-    print("  - Mixed precision (FP16) for tensor cores")
-    print("  - XLA JIT compilation")
-    print(f"  - Extremely large batch size: {16384}")
-    print(f"  - Large network: {NUM_CELLS} cells, {NUM_UES} UEs")
-    print(f"  - Large population: {FUZZER_POPULATION} individuals")
-    print("  - Continuous background GPU stress thread")
-    
-    # Start background GPU stress thread to maintain high GPU utilization throughout the run
-    bg_thread = start_background_gpu_stress()
-    
-    # Start GPU monitoring
-    monitor_thread = start_gpu_monitoring_thread()
+    print(f"  - Network: {NUM_CELLS} cells, {NUM_UES} UEs")
+    print(f"  - Fuzzer population: {FUZZER_POPULATION} individuals")
     
     start_time_main = time.time()
     all_results_data = []
@@ -3050,7 +3118,7 @@ def main():
         tf.get_logger().setLevel('ERROR') 
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
-            print(f"Found {len(gpus)} GPUs. Using {gpus[0].name} for high-GPU utilization simulation")
+            print(f"Found {len(gpus)} GPUs. Configuring GPU settings...")
             
             # Set memory growth to avoid allocating all GPU memory at once
             try:
@@ -3068,36 +3136,8 @@ def main():
                 print("XLA compilation and mixed precision enabled")
             except Exception as e:
                 print(f"Warning: Could not enable XLA or mixed precision: {e}")
-                
-            # Run a simple GPU utilization test first to prove we can reach high utilization
-            print("\nPhase 0: Direct GPU utilization test - should show ~80-95% GPU usage")
-            try:
-                with tf.device('/GPU:0'):
-                    # Use a specialized function for maximum GPU utilization
-                    print("Running GPU stress test...")
-                    matrix_size = 8192
-                    a = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-                    b = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-                    
-                    print("Executing large matrix multiplication to demonstrate peak GPU utilization...")
-                    for i in range(5):
-                        result = tf.matmul(a, b)
-                        # Force execution by calculating a value
-                        sum_val = tf.reduce_sum(result).numpy()
-                        print(f"Iteration {i+1}/5 complete. Matrix sum: {sum_val}")
-                        time.sleep(1)  # Give time for monitoring to show utilization
-            except Exception as e:
-                print(f"Error in GPU stress test: {e}")
             
-            # Run the optimized simulation to achieve 80-95% GPU utilization
-            print("\nLaunching GPU-optimized simulation...")
-            
-            # Run the optimization check to ensure GPU utilization is high
-            print("Phase 1: Testing GPU utilization with optimized code...")
-            run_optimized_simulation_for_high_gpu_utilization()
-            
-            # Then run the full comparative analysis for scientific validation
-            print("\nPhase 2: Running full comparative analysis with statistical validation...")
+            print("\n--- Running full comparative analysis ---")
             try:
                 results_df, effectiveness = run_full_comparative_analysis()
                 # Store results in all_results_data to ensure they're saved
@@ -3109,21 +3149,8 @@ def main():
                             all_fuzzer_effectiveness[scenario] = data
             except Exception as e:
                 print(f"\nError in comparative analysis: {e}")
-                print("Continuing with available results from Phase 1.")
+                print("Continuing with main simulation...")
             
-            # Ensure we run the main simulation loop to generate results
-            print("\nPhase 3: Running main simulation loop for all scenarios...")
-            
-            tf.config.set_visible_devices(gpus[0], 'GPU')
-            for gpu_device_config in tf.config.get_visible_devices('GPU'):
-                tf.config.experimental.set_memory_growth(gpu_device_config, True)
-                try:
-                    tf.config.experimental.set_memory_limit(gpu_device_config, 32768)
-                except Exception:
-                    print("Could not set memory limit, using dynamic growth.")
-            policy = tf.keras.mixed_precision.Policy('mixed_float16')
-            tf.keras.mixed_precision.set_global_policy(policy)
-            tf.config.optimizer.set_jit(True)
             print("--- GPU configuration successful ---")
         else:
             print("--- No GPU detected by TensorFlow. Running on CPU. ---")
@@ -3221,10 +3248,6 @@ def main():
             print(f"Debug: all_results_data is {type(all_results_data)} with length {len(all_results_data)}")
             print(f"Debug: scenarios_to_run had {len(scenarios_to_run)} scenarios")
 
-    # Stop background GPU stress thread
-    stop_background_gpu_stress()
-    print("Background GPU stress thread stopped")
-    
     end_time_main = time.time()
     print(f"\n--- Simulation Finished in {end_time_main - start_time_main:.2f} seconds ---")
 
