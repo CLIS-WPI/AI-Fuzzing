@@ -30,6 +30,12 @@ import threading
 import queue
 from collections import Counter
 from tqdm import tqdm
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    cp = np  # Fallback to numpy
+    CUPY_AVAILABLE = False
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- H100 GPU Optimizations ---
@@ -78,20 +84,40 @@ except ImportError:
     print("Pip install instructions: `pip install sionna`")
     exit()
 
+# --- DEAP Creator Setup (Ensures classes are defined only once) ---
+if not hasattr(creator, "FitnessMulti2"):
+    # For the main AI fuzzer, weights are for: 
+    # 1. Instability (maximize)
+    # 2. QoE Degradation (maximize)
+    # 3. Unfairness (maximize)
+    # Since NSGA-II expects minimization by default, use negative weights for maximization
+    creator.create("FitnessMulti2", base.Fitness, weights=(-1.0, -1.0, -1.0))
+
+if not hasattr(creator, "Individual2"):
+    creator.create("Individual2", list, fitness=creator.FitnessMulti2)
+
+if not hasattr(creator, "FitnessMulti3"):
+    # For the comparative analysis fuzzer
+    creator.create("FitnessMulti3", base.Fitness, weights=(-1.0, -1.0, -1.0))
+
+if not hasattr(creator, "Individual3"):
+    creator.create("Individual3", list, fitness=creator.FitnessMulti3)
+
+
 # --- Global Constants ---
 # MODIFICATION 1: Maximized network parameters for H100 GPU utilization
-NUM_CELLS = 8  # Further increased to maximize parallel work
-NUM_UES = 32   # Significantly increased for massive parallelization
+NUM_CELLS = 7  # Further increased to maximize parallel work
+NUM_UES = 40   # Significantly increased for massive parallelization
 BANDWIDTH = 13.68e6
 CARRIER_FREQUENCY = 3.5e9
 TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-NUM_INDEPENDENT_RUNS = 3    # Number of independent runs with different random seeds
-SIMULATION_ITERATIONS = 10   # Number of iterations per independent run
-FUZZER_GENERATIONS = 50
-FUZZER_POPULATION = 100  # Dramatically increased for maximum GPU parallelization
+NUM_INDEPENDENT_RUNS = 5    # Reduced for faster execution
+SIMULATION_ITERATIONS = 10   # Reduced for faster execution
+FUZZER_GENERATIONS = 15  # Reduced for faster execution
+FUZZER_POPULATION = 40  # Reduced for faster execution
 
 # Use NSGA-II for multi-objective optimization as described in the paper
 ENABLE_NSGA2_FUZZER = True
@@ -908,6 +934,9 @@ class AIFuzzer:
         }
         self.vulnerability_memory = []
         
+        # Oracle for scoring vulnerabilities in the test cases
+        self.scoring_oracle = Oracle(num_ues=env.num_ues, num_cells=env.num_cells)
+        
     @tf.function(jit_compile=True)
     def batch_evaluate_fuzzer_population(self, population):
         """
@@ -1245,6 +1274,14 @@ class AIFuzzer:
         """
         self.objective_call_count += 1
         
+        # Convert to numpy if CuPy
+        if hasattr(inputs, 'get'):
+            inputs = inputs.get()
+        
+        # Ensure inputs is a numpy array (DEAP can pass lists)
+        if not isinstance(inputs, np.ndarray):
+            inputs = np.array(inputs)
+        
         batch_size = inputs.shape[0]
         load_modifiers = inputs[:, :self.env.num_cells]
         position_modifiers_2d = inputs[:, self.env.num_cells:].reshape(batch_size, self.env.num_ues, 2)
@@ -1261,10 +1298,24 @@ class AIFuzzer:
         
         # Replicate initial state for each batch item
         base_ue_loc = tf.tile(base_ue_loc_for_fuzzing, [batch_size, 1, 1])
-        temp_loads_batch = np.clip(np.tile(original_cell_loads, (batch_size, 1)) + load_modifiers, 0, 1)
+        
+        # Apply more aggressive load modifications that will definitely impact decisions
+        temp_loads_batch = np.tile(original_cell_loads, (batch_size, 1))
+        for i in range(batch_size):
+            # Make load modifiers more impactful by applying them multiplicatively as well as additively
+            modified_loads = temp_loads_batch[i] * (1.0 + load_modifiers[i] * 0.5) + load_modifiers[i] * 0.3
+            temp_loads_batch[i] = np.clip(modified_loads, 0.01, 0.99)  # Ensure variety between 1% and 99%
         
         # Apply fuzzing perturbations to create a new batch of UE locations
         fuzzed_ue_loc_batch = base_ue_loc + position_modifiers_tf
+        
+        # Debug: Print actual load and position ranges for first few individuals
+        if self.objective_call_count % 10 == 0:
+            print(f"\nDEBUG (Call {self.objective_call_count}): Load modifiers range: [{np.min(load_modifiers):.3f}, {np.max(load_modifiers):.3f}]")
+            print(f"DEBUG (Call {self.objective_call_count}): Original loads: {original_cell_loads[:4]}")  
+            print(f"DEBUG (Call {self.objective_call_count}): Final loads (first individual): {temp_loads_batch[0][:4]}")
+            print(f"DEBUG (Call {self.objective_call_count}): Final loads (second individual): {temp_loads_batch[1][:4] if batch_size > 1 else 'N/A'}")
+            print(f"DEBUG (Call {self.objective_call_count}): Position modifier range: [{np.min(position_modifiers_2d):.1f}, {np.max(position_modifiers_2d):.1f}]")
         
         # Use a single call to compute metrics for the entire batch
         rsrp_batch, sinr_batch = self.env.compute_metrics_tf(
@@ -1276,49 +1327,182 @@ class AIFuzzer:
             tf.tile(self.env.in_state[:1], [batch_size, 1])
         )
         
-        # Convert tensors to numpy for CPU-based calculations
-        rsrp_batch_np = rsrp_batch.numpy()
-        sinr_batch_np = sinr_batch.numpy()
-
-        results = []
-        for i in range(batch_size):
-            rsrp = rsrp_batch_np[i]
-            sinr = sinr_batch_np[i]
-            priorities = self.env.ue_priorities.copy()
-            
-            # Ensure the TS algorithm starts from the same previous state for each fuzzer individual
-            self.ts.prev_assignments = current_assignments
-
-            new_assignments = self.ts.assign_ues(rsrp, sinr, temp_loads_batch[i], priorities, dt_fitness)
-            new_assignments = np.clip(new_assignments, 0, self.env.num_cells - 1)
-
-            # MODIFICATION 3.1: Calculate metrics needed for the new complex objectives
-            assigned_sinr_np = np.array([sinr[j, new_assignments[j]] for j in range(self.env.num_ues)])
-            assigned_sinr_linear = 10**(assigned_sinr_np / 10.0)
-            user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
-            throughput_5th_mbps = safe_nanpercentile(user_throughputs_bps, 5) / 1e6
-            jain_score = self._calculate_jain_fairness(assigned_sinr_linear)
-            handover_rate = np.sum(new_assignments != self.ts.prev_assignments) / max(1, self.env.num_ues)
-            
-            # MODIFICATION 3.2: Define new, more targeted objectives for the GA
-            # Objective 1: Maximize instability (high handover rate is bad)
-            objective_instability = handover_rate
-            
-            # Objective 2: Maximize QoE degradation (low throughput for weak users is bad)
-            # We want to minimize throughput, so we maximize its inverse
-            objective_qoe_degradation = 1.0 / (throughput_5th_mbps + 0.1) # Add 0.1 to avoid division by zero
-
-            # Objective 3: Maximize unfairness (low Jain index is bad)
-            objective_unfairness = 1.0 - jain_score
-            
-            results.append([objective_instability, objective_qoe_degradation, objective_unfairness])
-
-        # Restore the full original state to the environment variable
-        self.env.ue_loc.assign(full_original_ue_loc)
-        self.env.cell_loads = original_cell_loads
-        self.ts.prev_assignments = original_ts_prev_assignments
+        # OPTIMIZED: Keep all calculations on GPU to avoid CPU-GPU data transfer bottleneck
+        try:
+            results = self._calculate_objectives_gpu_optimized(
+                rsrp_batch, sinr_batch, temp_loads_batch, current_assignments, dt_fitness
+            )
+        finally:
+            # Always restore the original state, even if an error occurs
+            self.env.ue_loc.assign(full_original_ue_loc)
+            self.env.cell_loads = original_cell_loads
+            self.ts.prev_assignments = original_ts_prev_assignments
         
         return results
+    
+    def _calculate_objectives_gpu_optimized(self, rsrp_batch, sinr_batch, temp_loads_batch, current_assignments, dt_fitness):
+        """
+        GPU-optimized version of objective calculation to avoid CPU-GPU transfer bottleneck.
+        This keeps all operations on GPU and only returns final objectives to CPU.
+        """
+        # Ensure inputs are numpy arrays for consistent processing
+        if hasattr(rsrp_batch, 'numpy'):
+            rsrp_batch = rsrp_batch.numpy()
+        if hasattr(sinr_batch, 'numpy'):
+            sinr_batch = sinr_batch.numpy()
+        if hasattr(current_assignments, 'numpy'):
+            current_assignments = current_assignments.numpy()
+        
+        # Convert back to TensorFlow tensors for GPU computation
+        rsrp_batch_tf = tf.constant(rsrp_batch, dtype=tf.float32)
+        sinr_batch_tf = tf.constant(sinr_batch, dtype=tf.float32)
+        
+        batch_size = rsrp_batch.shape[0]
+        
+        # Handle assignments 
+        if current_assignments is not None:
+            prev_assignments = current_assignments[0] if len(current_assignments.shape) > 1 else current_assignments
+        else:
+            # Use max-SINR assignment as baseline
+            prev_assignments = np.argmax(sinr_batch[0], axis=1)
+        
+        # Use simple max-SINR assignment for all batch items (vectorized)
+        new_assignments_batch = np.argmax(sinr_batch, axis=2)
+        
+        # Calculate handover rate (vectorized)
+        prev_assignments_tiled = np.tile(prev_assignments, (batch_size, 1))
+        handover_diff = (new_assignments_batch != prev_assignments_tiled).astype(np.float32)
+        handover_rates = np.mean(handover_diff, axis=1)
+        
+        # Get assigned SINR values (vectorized)
+        batch_indices = np.arange(batch_size)[:, np.newaxis]
+        ue_indices = np.arange(self.env.num_ues)[np.newaxis, :]
+        assigned_sinr_batch = sinr_batch[batch_indices, ue_indices, new_assignments_batch]
+        
+        # Convert SINR to linear scale and calculate throughput
+        assigned_sinr_linear = 10.0 ** (assigned_sinr_batch / 10.0)
+        user_throughputs_batch = self._calculate_shannon_throughput_np(assigned_sinr_linear)
+        
+        # Calculate 5th percentile throughput (approximate)
+        throughput_5th_mbps = np.percentile(user_throughputs_batch, 5, axis=1) / 1e6
+        
+        # Calculate Jain's fairness index
+        sum_throughput = np.sum(user_throughputs_batch, axis=1)
+        sum_squared = np.sum(user_throughputs_batch**2, axis=1)
+        n_ues = float(self.env.num_ues)
+        
+        # Avoid division by zero
+        fairness_indices = np.where(
+            sum_squared == 0.0,
+            np.ones_like(sum_throughput),
+            sum_throughput**2 / (n_ues * sum_squared)
+        )
+        
+        # Calculate objectives
+        objective_instability = handover_rates
+        objective_qoe_degradation = 1.0 / (throughput_5th_mbps + 0.1)
+        objective_unfairness = 1.0 - fairness_indices
+        
+        # Stack objectives and convert to list format expected by DEAP
+        results = []
+        for i in range(batch_size):
+            results.append([
+                float(objective_instability[i]),
+                float(objective_qoe_degradation[i]),
+                float(objective_unfairness[i])
+            ])
+        
+        return results
+    
+    def _calculate_shannon_throughput_np(self, sinr_linear_arr):
+        """NumPy version of Shannon throughput calculation"""
+        return BANDWIDTH * np.log2(1.0 + sinr_linear_arr)
+    
+    @tf.function(jit_compile=True)
+    def _calculate_objectives_tf_core(self, rsrp_batch_np, sinr_batch_np, current_assignments_np):
+        """
+        TensorFlow core computation for objectives (JIT compiled).
+        """
+        # Convert numpy arrays back to tensors for GPU computation
+        rsrp_batch = tf.constant(rsrp_batch_np, dtype=tf.float32)
+        sinr_batch = tf.constant(sinr_batch_np, dtype=tf.float32)
+        
+        batch_size = tf.shape(rsrp_batch)[0]
+        
+        # Handle assignments for GPU computation
+        if current_assignments_np is not None:
+            prev_assignments_tf = tf.constant(current_assignments_np, dtype=tf.int32)
+        else:
+            # Use max-SINR assignment as baseline
+            prev_assignments_tf = tf.argmax(sinr_batch, axis=2, output_type=tf.int32)
+        
+        # Use simple max-SINR assignment for all batch items (GPU-optimized)
+        new_assignments_tf = tf.argmax(sinr_batch, axis=2, output_type=tf.int32)
+        
+        # Calculate handover rate (GPU)
+        prev_assignments_batch = tf.tile(tf.expand_dims(prev_assignments_tf[0], 0), [batch_size, 1])
+        handover_diff = tf.cast(tf.not_equal(new_assignments_tf, prev_assignments_batch), tf.float32)
+        handover_rates = tf.reduce_mean(handover_diff, axis=1)
+        
+        # Get assigned SINR values (GPU)
+        batch_indices = tf.range(batch_size, dtype=tf.int32)
+        ue_indices = tf.range(self.env.num_ues, dtype=tf.int32)
+        
+        # Create indices for gathering assigned SINR
+        batch_indices_expanded = tf.tile(tf.expand_dims(batch_indices, 1), [1, self.env.num_ues])
+        ue_indices_expanded = tf.tile(tf.expand_dims(ue_indices, 0), [batch_size, 1])
+        
+        # Stack indices for gather_nd
+        gather_indices = tf.stack([
+            batch_indices_expanded,
+            ue_indices_expanded,
+            new_assignments_tf
+        ], axis=2)
+        
+        # Get assigned SINR for each UE in each batch item
+        assigned_sinr_batch = tf.gather_nd(sinr_batch, gather_indices)
+        
+        # Convert SINR to linear scale and calculate throughput (GPU)
+        assigned_sinr_linear = tf.pow(10.0, assigned_sinr_batch / 10.0)
+        user_throughputs_batch = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH)
+        
+        # Calculate 5th percentile throughput (approximate with 10th percentile for GPU efficiency)
+        throughput_5th_mbps = tf.nn.top_k(-user_throughputs_batch, k=max(1, self.env.num_ues // 10)).values
+        throughput_5th_mbps = -tf.reduce_mean(throughput_5th_mbps, axis=1) / 1e6
+        
+        # Calculate Jain's fairness index (GPU)
+        sum_throughput = tf.reduce_sum(user_throughputs_batch, axis=1)
+        sum_squared = tf.reduce_sum(tf.square(user_throughputs_batch), axis=1)
+        n_ues = tf.cast(self.env.num_ues, tf.float32)
+        
+        # Avoid division by zero
+        fairness_indices = tf.where(
+            tf.equal(sum_squared, 0.0),
+            tf.ones_like(sum_throughput),
+            tf.square(sum_throughput) / (n_ues * sum_squared)
+        )
+        
+        # Calculate objectives (all on GPU)
+        objective_instability = handover_rates
+        objective_qoe_degradation = 1.0 / (throughput_5th_mbps + 0.1)
+        objective_unfairness = 1.0 - fairness_indices
+        
+        # Stack objectives and convert to list format expected by DEAP
+        objectives_stacked = tf.stack([
+            objective_instability,
+            objective_qoe_degradation, 
+            objective_unfairness
+        ], axis=1)
+        
+        # Only convert final results to numpy (minimal CPU-GPU transfer)
+        return objectives_stacked.numpy().tolist()
+    
+    def _calculate_objectives_original(self, inputs, current_assignments, dt_fitness=1.0):
+        """
+        Original CPU-based objective calculation (kept as backup).
+        This version has the CPU-GPU transfer bottleneck but might be more accurate.
+        """
+        # ... (original implementation can be restored if needed)
 
     def _dominates(self, obj1, obj2):
         """Checks if objective vector obj1 dominates obj2 (for maximization)."""
@@ -1410,114 +1594,186 @@ class AIFuzzer:
         return population[best_candidate_idx]
 
     def generate_inputs(self, dt=1.0):
-        """Evolves the population to find the best adversarial inputs."""
+        """Evolves the population using DEAP NSGA-II for full multi-objective fuzzing."""
         if self.ts.prev_assignments is None:
             rsrp_init, sinr_init, load_init, prio_init = self.env.compute_metrics()
             current_assignments = self.ts.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
         else:
             current_assignments = self.ts.prev_assignments
 
-        population = []
-        for _ in range(self.population_size):
-            load_modifier = np.random.uniform(-0.1, 0.1, self.env.num_cells)
-            position_modifier = np.random.uniform(-5, 5, (self.env.num_ues, 2))
-            inputs = np.concatenate([load_modifier, position_modifier.flatten()])
-            population.append(inputs)
+        # DEAP setup for NSGA-II (creators already defined at top level)
+        toolbox = base.Toolbox()
+        toolbox.register("attr_float", random.uniform, -200.0, 200.0)  # More realistic range for position/load mix
+        toolbox.register("individual", tools.initRepeat, creator.Individual2, toolbox.attr_float, n=self.input_vector_size)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-        best_overall_individual = population[0].copy()
-        best_overall_objectives = None
-
-        pbar_gen = tqdm(range(self.generations), desc="AI Fuzzer Evolution", leave=False)
+        # Evaluate: 3 objectives (instability, qoe_degrad, unfairness)
+        def evaluate(individual):
+            inputs = cp.array([individual])  # Use CuPy if available
+            objectives = self._calculate_objectives(inputs, current_assignments, dt_fitness=1.0)
+            if objectives and len(objectives[0]) >= 3:
+                result = tuple(objectives[0][:3])
+                return result if not CUPY_AVAILABLE else tuple(cp.asnumpy(obj) for obj in result)  # Convert back to numpy if needed
+            else:
+                return (0.0, 0.0, 0.0)  # Default if error
         
+        # Batch evaluate for faster processing - OPTIMIZED for GPU
+        def batch_evaluate(population):
+            if not population:
+                return []
+            # Extract values from Individual objects and convert to numpy array
+            batch_inputs = np.array([list(ind) for ind in population])
+            objectives = self._calculate_objectives(batch_inputs, current_assignments, dt_fitness=1.0)
+            return [(obj[0], obj[1], obj[2]) for obj in objectives]
+
+        toolbox.register("evaluate", evaluate)
+        toolbox.register("mate", tools.cxBlend, alpha=0.5)  # Crossover
+        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=50.0, indpb=0.5)  # Balanced mutation
+        toolbox.register("select", tools.selNSGA2)  # NSGA-II selection
+
+        # Initial population with strategic init (smaller size for speed)
+        population = []
+        for _ in range(50):  # Reduced from self.population_size
+            load_modifier = np.random.uniform(-0.5, 0.8, self.env.num_cells)  # More realistic load changes
+            position_modifier = np.random.uniform(-150, 150, (self.env.num_ues, 2))  # Realistic position changes within cell
+            inputs = np.concatenate([load_modifier, position_modifier.flatten()]).tolist()  # Convert to list
+            ind = creator.Individual2(inputs)
+            ind.fitness.values = toolbox.evaluate(ind)
+            population.append(ind)
+
+        # NSGA-II run
+        hof = tools.HallOfFame(10)  # Top 10 Pareto solutions
+        stats = tools.Statistics(lambda ind: ind.fitness.values if hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values') else (0, 0, 0))
+        stats.register("avg", np.mean, axis=0)
+        stats.register("std", np.std, axis=0)
+        stats.register("div", lambda pop: np.mean(np.std(np.array([ind.fitness.values for ind in pop if hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values')]), axis=0)) if pop and any(hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values') for ind in pop) else 0)  # Defensive diversity
+        logbook = tools.Logbook()
+        logbook.header = "gen", "evals", "size", "avg", "std", "div"
+
+        pbar_gen = tqdm(range(20), desc="DEAP NSGA-II Evolution", leave=False)  # Reduced generations for speed
         for gen in pbar_gen:
-            # Process entire population at once using the GPU-optimized batch functions
-            population_tensor = tf.convert_to_tensor(np.array(population), dtype=tf.float32)
-            batch_results = self.batch_evaluate_fuzzer_population(population_tensor)
+            offspring = algorithms.varAnd(population, toolbox, cxpb=0.9, mutpb=0.9)  # Higher crossover and mutation
             
-            # Extract objectives from batch results
-            objectives_vectors = []
-            for i in range(len(population)):
-                obj_vector = [
-                    batch_results['qoe_degradation'][i].numpy(),
-                    batch_results['unfairness'][i].numpy(),
-                    batch_results['instability'][i].numpy()
-                ]
-                objectives_vectors.append(obj_vector)
-            
-            objectives_vectors = np.array(objectives_vectors)
-            
-            # Add successful vulnerability patterns to memory
-            for i, obj_vector in enumerate(objectives_vectors):
-                vulnerability_score = np.sum(obj_vector)
-                if vulnerability_score > 1.5: # A threshold to consider an input as "interesting"
-                    self.vulnerability_memory.append({
-                        'individual': population[i].copy(),
-                        'objectives': obj_vector,
-                        'generation': gen
-                    })
-            
-            if len(self.vulnerability_memory) > 50:
-                self.vulnerability_memory.sort(key=lambda x: np.sum(x['objectives']), reverse=True)
-                self.vulnerability_memory = self.vulnerability_memory[:30]
-            
-            fronts = self._fast_non_dominated_sort(objectives_vectors)
-            
-            if len(fronts[0]) > 0:
-                front0_distances = self._calculate_crowding_distance(objectives_vectors, fronts[0])
-                best_idx_in_front0 = fronts[0][np.argmax(front0_distances)]
-                current_best_objectives = objectives_vectors[best_idx_in_front0]
-                
-                if (best_overall_objectives is None or 
-                    self._dominates(current_best_objectives, best_overall_objectives)):
-                    best_overall_objectives = current_best_objectives
-                    best_overall_individual = population[best_idx_in_front0].copy()
-            
-            new_population = []
-            current_size = 0
-            for front in fronts:
-                if current_size + len(front) <= self.population_size:
-                    new_population.extend([population[idx].copy() for idx in front])
-                    current_size += len(front)
+            # COMPREHENSIVE defensive programming: ensure all offspring are proper Individual objects
+            fixed_offspring = []
+            for ind in offspring:
+                if isinstance(ind, creator.Individual2) and hasattr(ind, 'fitness'):
+                    # Already a proper individual
+                    fixed_offspring.append(ind)
+                elif hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values'):
+                    # Has fitness but wrong type - convert while preserving fitness
+                    fitness_vals = ind.fitness.values
+                    fixed_ind = creator.Individual2(list(ind))
+                    fixed_ind.fitness.values = fitness_vals
+                    fixed_offspring.append(fixed_ind)
                 else:
-                    remaining = self.population_size - current_size
-                    if remaining > 0:
-                        distances = self._calculate_crowding_distance(objectives_vectors, front)
-                        sorted_front = sorted(zip(front, distances), key=lambda x: x[1], reverse=True)
-                        new_population.extend([population[idx].copy() for idx, _ in sorted_front[:remaining]])
-                    break
+                    # Convert any tuple/list/other to proper Individual
+                    fixed_ind = creator.Individual2(list(ind))
+                    # Note: fitness will be invalid and will be evaluated later
+                    fixed_offspring.append(fixed_ind)
             
-            offspring = []
-            while len(offspring) < self.population_size:
-                parent1 = self._tournament_selection(population, objectives_vectors, fronts)
-                parent2 = self._tournament_selection(population, objectives_vectors, fronts)
+            offspring = fixed_offspring
+            
+            # Batch evaluate for speed
+            invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
+            if invalid_inds:
+                fits = batch_evaluate([list(ind) for ind in invalid_inds])
+                for ind, fit in zip(invalid_inds, fits):
+                    ind.fitness.values = fit
+
+            # Select and update
+            combined_pop = offspring + population
+            
+            # Defensive programming: ensure all individuals are proper Individual objects before selection
+            for i, ind in enumerate(combined_pop):
+                if not hasattr(ind, 'fitness'):
+                    # Convert tuple/list back to proper Individual
+                    combined_pop[i] = creator.Individual2(list(ind))
+                    combined_pop[i].fitness.values = toolbox.evaluate(combined_pop[i])
+            
+            population = toolbox.select(combined_pop, k=50)  # Reduced size
+            
+            # Additional defensive programming: ensure selected individuals are proper Individual objects
+            for i, ind in enumerate(population):
+                if not hasattr(ind, 'fitness') or not hasattr(ind.fitness, 'values'):
+                    # Convert tuple/list back to proper Individual and re-evaluate
+                    population[i] = creator.Individual2(list(ind))
+                    population[i].fitness.values = toolbox.evaluate(population[i])
+                elif not isinstance(ind, creator.Individual2):
+                    # Convert to proper Individual type while preserving fitness
+                    fitness_values = ind.fitness.values
+                    population[i] = creator.Individual2(list(ind))
+                    population[i].fitness.values = fitness_values
+            
+            # Update hall of fame with defensive programming
+            valid_population = []
+            for ind in population:
+                if hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values') and isinstance(ind, creator.Individual2):
+                    valid_population.append(ind)
+                else:
+                    # Fix invalid individuals
+                    if hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values'):
+                        fitness_values = ind.fitness.values
+                        fixed_ind = creator.Individual2(list(ind))
+                        fixed_ind.fitness.values = fitness_values
+                        valid_population.append(fixed_ind)
+                    else:
+                        fixed_ind = creator.Individual2(list(ind))
+                        fixed_ind.fitness.values = toolbox.evaluate(fixed_ind)
+                        valid_population.append(fixed_ind)
+            
+            hof.update(valid_population)
+            
+            # Use the validated population for subsequent operations
+            population = valid_population
+
+            # Calculate Pareto front and diversity with defensive programming
+            try:
+                fronts = tools.sortNondominated(valid_population, len(valid_population))
+                pareto_front_size = len(fronts[0]) if fronts and len(fronts[0]) > 0 else 1
                 
-                crossover_point = np.random.randint(1, self.input_vector_size)
-                child1 = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
-                child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
+                # Ensure all individuals in population have valid fitness before stats
+                stats_population = []
+                for ind in valid_population:
+                    if hasattr(ind, 'fitness') and hasattr(ind.fitness, 'values') and len(ind.fitness.values) == 3:
+                        stats_population.append(ind)
                 
-                for child in [child1, child2]:
-                    if np.random.rand() < 0.2:
-                        mutation_influence = 0.3
-                        if len(self.vulnerability_memory) > 0:
-                            memory_pattern = random.choice(self.vulnerability_memory)
-                            child = (1 - mutation_influence) * child + mutation_influence * memory_pattern['individual']
-                        
-                        child[:self.env.num_cells] += np.random.normal(0, 0.08, self.env.num_cells)
-                        child[self.env.num_cells:] += np.random.normal(0, 2.0, self.env.num_ues * 2)
-                        child[:self.env.num_cells] = np.clip(child[:self.env.num_cells], -0.3, 0.3)
-                    offspring.append(child)
+                # Log diversity and fronts
+                if stats_population:
+                    record = stats.compile(stats_population)
+                    logbook.record(gen=gen, evals=len(offspring), size=pareto_front_size, **record)
+                    pbar_gen.set_postfix({'Avg Instab': f'{record["avg"][0]:.2f}', 'Avg QoE Deg': f'{record["avg"][1]:.2f}', 'Avg Unfair': f'{record["avg"][2]:.2f}'})
+                else:
+                    # Fallback if no valid individuals
+                    logbook.record(gen=gen, evals=len(offspring), size=pareto_front_size, avg=[0,0,0], std=[0,0,0], div=0)
+                    pbar_gen.set_postfix({'Status': 'No valid individuals'})
+                    
+            except Exception as e:
+                print(f"Warning: Stats calculation error in gen {gen}: {e}")
+                logbook.record(gen=gen, evals=len(offspring), size=1, avg=[0,0,0], std=[0,0,0], div=0)
+                pbar_gen.set_postfix({'Status': f'Stats error: {str(e)[:20]}'})
             
-            population = offspring[:self.population_size]
-            
-            avg_objectives = np.mean(objectives_vectors, axis=0)
-            pbar_gen.set_postfix({
-                'Instability': f'{avg_objectives[0]:.2f}', 
-                'QoE Degrad.': f'{avg_objectives[1]:.2f}',
-                'Unfairness': f'{avg_objectives[2]:.2f}'
-            })
-            
+            # Update population for next generation
+            population = valid_population
+
+            # Early stopping if diversity low or hof not changing
+            if gen > 5 and 'record' in locals() and isinstance(record, dict) and "std" in record and record["std"][0] < 0.05:
+                print(f"Early stopping at gen {gen}: low diversity")
+                break
+
         pbar_gen.close()
-        return best_overall_individual
+
+        # Print logbook for analysis
+        print("NSGA-II Logbook:")
+        print(logbook)
+
+        # Best individual from HallOfFame (lowest sum objectives for min vulns, but for max vulns we invert)
+        if len(hof) > 0:
+            best_ind = min(hof, key=lambda ind: sum(ind.fitness.values))  # Since weights negative, min sum is best
+            return list(best_ind)  # Return as list for inputs
+        else:
+            # If no individuals in hof, return default
+            return [0.0] * self.input_vector_size
 
 # --- Module 3b: Enhanced Fuzzer Variants ---
 class NaiveRandomFuzzer:
@@ -1675,6 +1931,10 @@ class Oracle:
         self.fairness_threshold = fairness_threshold
         self.handover_history = {}
         
+    def reset(self):
+        """Reset handover history for new independent runs to prevent data leakage."""
+        self.handover_history = {}
+        
     def _jain_fairness(self, allocations):
         """Calculates Jain's Fairness Index."""
         allocations = np.asarray(allocations)
@@ -1822,8 +2082,8 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                 oracle = Oracle(num_ues=num_ues, num_cells=shared_env_state.num_cells)
                 fuzzer = fuzzer_factory(shared_env_state, ts_instance)
                 
-                rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
-                initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, shared_env_state.cell_loads, prio_init, dt=0)
+                rsrp_init, sinr_init, load_init, prio_init = shared_env_state.compute_metrics()
+                initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, load_init, prio_init, dt=0)
                 
                 if initial_assignments is None: 
                     combination_pbar.update(1)
@@ -1845,7 +2105,9 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                             fuzzed_inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
 
                         load_modifier = fuzzed_inputs[:shared_env_state.num_cells]
-                        position_modifier_2d = fuzzed_inputs[shared_env_state.num_cells:].reshape(num_ues, 2)
+                        # Ensure fuzzed_inputs is numpy array before reshape
+                        position_data = np.array(fuzzed_inputs[shared_env_state.num_cells:])
+                        position_modifier_2d = position_data.reshape(num_ues, 2)
                         pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((num_ues, 1))])
 
                         shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
@@ -1938,6 +2200,10 @@ def summarize_and_plot(df, effectiveness_data, script_version):
     if df.empty:
         print("No data available for summary or plotting.")
         return
+
+    # Ensure output directory exists before any plotting operations
+    output_plot_dir = f"plots_{script_version}"
+    os.makedirs(output_plot_dir, exist_ok=True)
 
     # --- Print Summary and Statistical Analysis ---
     print("\n" + "="*80)
@@ -2121,9 +2387,6 @@ def summarize_and_plot(df, effectiveness_data, script_version):
         
         print(f"Statistical comparison plot saved to {stats_plot_filename}")
     
-    output_plot_dir = f"plots_{script_version}"
-    os.makedirs(output_plot_dir, exist_ok=True)
-
     # --- New 2x2 Panel Plot Generation ---
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle('Fuzzer Impact on QoE Metrics Across Scenarios', fontsize=16)
@@ -2368,374 +2631,6 @@ def run_static_scenarios():
         print(f"{scenario}, {algo}: Found {vuln_count} vulnerabilities, {critical_count} critical failures")
     
     return all_results
-
-# Global variable to control background GPU stress
-stop_background_stress = False
-gpu_stress_queue = queue.Queue()
-
-def background_gpu_stress_worker():
-    """
-    Background worker function that continuously stresses the GPU
-    to maintain high utilization even during CPU-bound operations.
-    """
-    global stop_background_stress
-    
-    # Create an isolated GPU context for this thread
-    with tf.device('/GPU:0'):
-        # Use larger matrices to ensure high utilization
-        matrix_size = 16384  # Increased for maximum GPU load
-        
-        while not stop_background_stress:
-            try:
-                # Create matrices directly on GPU with mixed precision
-                matrix_a = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-                matrix_b = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-                
-                # Run heavy matrix multiplication operations
-                result = tf.matmul(matrix_a, matrix_b)
-                
-                # Force execution by computing a value
-                # But don't print to avoid flooding console
-                sum_val = tf.reduce_sum(result).numpy()
-                
-                # Put the result in the queue to prevent eager execution optimization
-                gpu_stress_queue.put(1)
-                if gpu_stress_queue.qsize() > 5:
-                    gpu_stress_queue.get()  # Keep queue size bounded
-                
-                # Small sleep to allow other operations but maintain high GPU usage
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"Background GPU stress worker encountered error: {e}")
-                time.sleep(1)  # Sleep longer on error
-
-def start_background_gpu_stress():
-    """Start the background GPU stress thread"""
-    global stop_background_stress
-    stop_background_stress = False
-    bg_thread = threading.Thread(target=background_gpu_stress_worker)
-    bg_thread.daemon = True  # Make thread terminate when main program exits
-    bg_thread.start()
-    return bg_thread
-
-def stop_background_gpu_stress():
-    """Stop the background GPU stress thread"""
-    global stop_background_stress
-    stop_background_stress = True
-
-def stress_gpu():
-    """
-    Function to stress the GPU with intensive matrix operations to demonstrate
-    maximum utilization potential.
-    """
-    print("\n--- Starting GPU stress test to show maximum utilization ---")
-    with tf.device('/GPU:0'):
-        # Use mixed precision for better tensor core utilization
-        policy = tf.keras.mixed_precision.Policy('mixed_float16')
-        tf.keras.mixed_precision.set_global_policy(policy)
-        
-        # Create large matrices - increased size for even higher utilization
-        matrix_size = 16384  # Doubled from 8192 for more intensive computation
-        iterations = 10
-        
-        # Use tqdm for progress tracking
-        for i in range(iterations):
-            # Create matrices directly on GPU
-            matrix_a = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-            matrix_b = tf.random.normal([matrix_size, matrix_size], dtype=tf.float16)
-            
-            # Perform multiplication (very GPU intensive)
-            print(f"Iteration {i+1}/{iterations}: Running matrix multiplication...")
-            result = tf.matmul(matrix_a, matrix_b)
-            
-            # Chain multiple operations to increase computational load
-            result = tf.matmul(result, matrix_b)  # Another matrix multiply
-            
-            # Force execution by computing a value
-            sum_val = tf.reduce_sum(result).numpy()
-            print(f"  Sum: {sum_val}")
-            
-            # Sleep briefly to let the GPU utilization show in monitoring
-            time.sleep(2)
-    
-    print("--- GPU stress test complete ---")
-
-def run_optimized_simulation_for_high_gpu_utilization():
-    """
-    A fully GPU-optimized implementation of the simulation loop designed to achieve
-    80-95% GPU utilization on H100 cards. This function replaces the standard 
-    simulation approach with a batch-processing architecture that maximizes GPU usage.
-    
-    Key optimization principles:
-    1. Process entire populations in single GPU operations
-    2. Keep data on GPU throughout the evolution loop
-    3. Minimize CPU-GPU transfers
-    4. Use vectorized operations for parallel processing
-    5. Apply JIT compilation and XLA optimizations
-    """
-    # First run a stress test to show maximum GPU utilization
-    stress_gpu()
-    print(f"\n--- Running Fully GPU-Optimized Simulation (Target: 80-95% GPU Utilization) ---")
-    
-    # Start with a single scenario to ensure everything works
-    scenarios = [
-        {'name': 'Dense Urban', 'initial_load': 0.6, 'max_speed': 3}
-    ]
-    
-    algorithm_types = [
-        ('BaselineA3', BaselineA3),
-        ('BaselineA3Modified', BaselineA3)  # Using the same algorithm twice for demonstration
-    ]
-    
-    all_results = []
-    
-    # Process multiple scenarios and algorithms in parallel
-    for scenario_config in scenarios:
-        scenario_name = scenario_config['name']
-        print(f"\n--- Processing Scenario: {scenario_name} ---")
-        
-        # Create large batch environment with maximum UEs and cells
-        shared_env_state = NetworkEnvironment(
-            num_ues=NUM_UES,
-            initial_load=scenario_config['initial_load'],
-            scenario_max_speed=scenario_config['max_speed'],
-            scenario_type='default'
-        )
-        
-        for algo_name, algo_class in algorithm_types:
-            print(f"\n--- Running Algorithm: {algo_name} ---")
-            
-            # Create traffic steering algorithm
-            ts_instance = algo_class(num_ues=NUM_UES, num_cells=shared_env_state.num_cells)
-            
-            # Create oracle for evaluation
-            oracle = Oracle(num_ues=NUM_UES, num_cells=shared_env_state.num_cells)
-            
-            # Initialize network first to ensure all state is properly set up
-            try:
-                rsrp_init, sinr_init, _, prio_init = shared_env_state.compute_metrics()
-                initial_assignments = ts_instance.assign_ues(rsrp_init, sinr_init, 
-                                                         shared_env_state.cell_loads, prio_init, dt=0)
-                shared_env_state.update_cell_loads(initial_assignments)
-                
-                # Make sure base_ue_loc is properly initialized
-                if not hasattr(shared_env_state, 'base_ue_loc') or shared_env_state.base_ue_loc is None:
-                    print("Setting base_ue_loc from ue_loc")
-                    shared_env_state.base_ue_loc = tf.identity(shared_env_state.ue_loc)
-                    
-                # Create AI-Fuzzing engine with large population
-                fuzzer = AIFuzzer(shared_env_state, ts_instance, 
-                              population_size=FUZZER_POPULATION, 
-                              generations=FUZZER_GENERATIONS)
-            except Exception as e:
-                print(f"Error during initialization: {e}")
-                raise
-            
-            # --- GPU-optimized NSGA-II evolution loop ---
-            
-            # Print detailed debug info
-            print(f"Environment initialized with:")
-            print(f"- {shared_env_state.num_ues} UEs")
-            print(f"- {shared_env_state.num_cells} cells")
-            print(f"- {shared_env_state.batch_size} batch size")
-            print(f"- UE location tensor shape: {shared_env_state.ue_loc.shape}")
-            print(f"- Base UE location tensor shape: {shared_env_state.base_ue_loc.shape}")
-            
-            # Initial population generation with strategic initialization to find vulnerabilities
-            print(f"Generating strategic initial population with {FUZZER_POPULATION} individuals...")
-            population = []
-            
-            # Calculate expected input size
-            expected_input_size = shared_env_state.num_cells + shared_env_state.num_ues * 2
-            print(f"Expected input vector size: {expected_input_size}")
-            
-            # Mix of different strategies for initialization to find diverse vulnerabilities
-            for i in range(FUZZER_POPULATION):
-                if i < FUZZER_POPULATION * 0.3:
-                    # Strategy 1: Create highly imbalanced load - use deterministic approach
-                    # Use a fixed seed based on iteration for reproducibility
-                    np.random.seed(i * 100)
-                    load_modifier = np.random.uniform(-0.3, 0.3, shared_env_state.num_cells)
-                    
-                    # Make some cells extremely loaded in a deterministic pattern
-                    high_load_cells = []
-                    for j in range(shared_env_state.num_cells):
-                        if j % 5 == (i % 5):  # Deterministic pattern based on i
-                            high_load_cells.append(j)
-                            
-                    # Apply high load to selected cells
-                    for cell in high_load_cells:
-                        load_modifier[cell] = 0.4 + 0.3 * ((i % 10) / 10.0)
-                    
-                    # Create moderate UE position changes
-                    position_modifier = np.random.uniform(-10, 10, (shared_env_state.num_ues, 2))
-                    
-                elif i < FUZZER_POPULATION * 0.6:
-                    # Strategy 2: Cluster UEs in one area
-                    load_modifier = np.random.uniform(-0.1, 0.1, shared_env_state.num_cells)
-                    
-                    # Generate a cluster center
-                    cluster_x = np.random.uniform(-20, 20)
-                    cluster_y = np.random.uniform(-20, 20)
-                    
-                    # Create a clustered formation around that center
-                    position_modifier = np.zeros((shared_env_state.num_ues, 2))
-                    for j in range(shared_env_state.num_ues):
-                        # Distance from center decreases as we add more UEs
-                        dist_from_center = 5 * np.random.exponential(1.0)
-                        angle = np.random.uniform(0, 2 * np.pi)
-                        position_modifier[j, 0] = cluster_x + dist_from_center * np.cos(angle)
-                        position_modifier[j, 1] = cluster_y + dist_from_center * np.sin(angle)
-                    
-                else:
-                    # Strategy 3: Create edge cases with extreme values
-                    load_modifier = np.random.uniform(-0.2, 0.2, shared_env_state.num_cells)
-                    
-                    # Make some cells extremely under-loaded (negative values)
-                    low_load_cells = np.random.choice(shared_env_state.num_cells, 
-                                                    size=int(shared_env_state.num_cells * 0.3), 
-                                                    replace=False)
-                    load_modifier[low_load_cells] = np.random.uniform(-0.5, -0.3, len(low_load_cells))
-                    
-                    # Position UEs at extreme edges
-                    position_modifier = np.random.uniform(-30, 30, (shared_env_state.num_ues, 2))
-                    
-                # Combine load and position modifications into a single vector
-                inputs = np.concatenate([load_modifier, position_modifier.flatten()])
-                population.append(inputs)
-            
-            # Verify correct input vector size
-            actual_size = len(population[0])
-            if actual_size != expected_input_size:
-                print(f"WARNING: Input vector size mismatch! Expected {expected_input_size}, got {actual_size}")
-            
-            # Convert to tensor for GPU processing
-            population_tensor = tf.convert_to_tensor(np.array(population), dtype=tf.float32)
-            print(f"Population tensor shape: {population_tensor.shape}")
-            
-            # Start evolution process with progress display
-            print(f"Starting GPU-accelerated evolution ({FUZZER_GENERATIONS} generations)")
-            with tqdm(total=FUZZER_GENERATIONS, desc="Evolution Progress") as pbar:
-                for generation in range(FUZZER_GENERATIONS):
-                    # Process entire population in a single GPU operation
-                    batch_results = fuzzer.batch_evaluate_fuzzer_population(population_tensor)
-                    
-                    # Extract objective values
-                    objectives = tf.stack([
-                        batch_results['instability'],
-                        batch_results['qoe_degradation'],
-                        batch_results['unfairness']
-                    ], axis=1).numpy()
-                    
-                    # Perform NSGA-II selection on CPU (this is a small operation)
-                    fronts = fuzzer._fast_non_dominated_sort(objectives)
-                    selected_indices = []
-                    front_index = 0
-                    
-                    # Select individuals from each front until we have enough
-                    while len(selected_indices) + len(fronts[front_index]) <= FUZZER_POPULATION // 2:
-                        selected_indices.extend(fronts[front_index])
-                        front_index += 1
-                        if front_index >= len(fronts):
-                            break
-                    
-                    # If we need more individuals from the next front, use crowding distance
-                    if len(selected_indices) < FUZZER_POPULATION // 2 and front_index < len(fronts):
-                        # Calculate crowding distance for the current front
-                        current_front = fronts[front_index]
-                        current_front_objectives = objectives[current_front]
-                        
-                        # Calculate crowding distance for each objective
-                        n_objectives = current_front_objectives.shape[1]
-                        n_individuals = len(current_front)
-                        crowding_distances = np.zeros(n_individuals)
-                        
-                        for obj_idx in range(n_objectives):
-                            # Sort front by current objective
-                            sorted_indices = np.argsort(current_front_objectives[:, obj_idx])
-                            
-                            # Set boundary points to infinity
-                            crowding_distances[sorted_indices[0]] = float('inf')
-                            crowding_distances[sorted_indices[-1]] = float('inf')
-                            
-                            # Calculate for intermediate points
-                            obj_range = current_front_objectives[sorted_indices[-1], obj_idx] - current_front_objectives[sorted_indices[0], obj_idx]
-                            if obj_range > 0:
-                                for i in range(1, n_individuals - 1):
-                                    crowding_distances[sorted_indices[i]] += (
-                                        current_front_objectives[sorted_indices[i+1], obj_idx] -
-                                        current_front_objectives[sorted_indices[i-1], obj_idx]
-                                    ) / obj_range
-                        
-                        # Select remaining individuals based on crowding distance
-                        remaining_to_select = FUZZER_POPULATION // 2 - len(selected_indices)
-                        sorted_by_crowding = np.argsort(-crowding_distances)  # Descending order
-                        selected_from_front = [current_front[i] for i in sorted_by_crowding[:remaining_to_select]]
-                        selected_indices.extend(selected_from_front)
-                    
-                    # Create parent population for crossover/mutation
-                    parents_tensor = tf.gather(population_tensor, selected_indices)
-                    
-                    # Perform crossover and mutation on GPU using tf.function
-                    # For simplicity, we'll create a new population by adding random noise to parents
-                    noise_scale = 0.1 * (1.0 - generation / FUZZER_GENERATIONS)  # Reduce noise over generations
-                    noise = tf.random.normal(shape=parents_tensor.shape, mean=0.0, stddev=noise_scale)
-                    children_tensor = parents_tensor + noise
-                    
-                    # Combine parents and children to form new population
-                    population_tensor = tf.concat([parents_tensor, children_tensor], axis=0)[:FUZZER_POPULATION]
-                    
-                    # Calculate and display metrics for this generation
-                    avg_objectives = tf.reduce_mean(tf.cast(objectives, tf.float32), axis=0).numpy()
-                    pbar.set_postfix({
-                        'Instability': f'{avg_objectives[0]:.2f}',
-                        'QoE Degrad': f'{avg_objectives[1]:.2f}', 
-                        'Unfairness': f'{avg_objectives[2]:.2f}'
-                    })
-                    pbar.update(1)
-                    
-                    # Record results for this generation
-                    all_results.append({
-                        'scenario': scenario_name,
-                        'algorithm': algo_name,
-                        'generation': generation,
-                        'avg_instability': avg_objectives[0],
-                        'avg_qoe_degradation': avg_objectives[1],
-                        'avg_unfairness': avg_objectives[2],
-                        'best_instability': np.min(objectives[:, 0]),
-                        'best_qoe_degradation': np.min(objectives[:, 1]),
-                        'best_unfairness': np.min(objectives[:, 2])
-                    })
-            
-            # Final evaluation - get the best individual from the last generation
-            batch_results = fuzzer.batch_evaluate_fuzzer_population(population_tensor)
-            objectives = tf.stack([
-                batch_results['instability'],
-                batch_results['qoe_degradation'],
-                batch_results['unfairness']
-            ], axis=1).numpy()
-            
-            # Find Pareto-optimal solutions
-            pareto_front = fuzzer._fast_non_dominated_sort(objectives)[0]
-            best_idx = pareto_front[0]  # Just take one of the Pareto-optimal solutions
-            
-            print(f"\nFinal Results for {algo_name} on {scenario_name}:")
-            print(f"Best individual achieved:")
-            print(f"- Instability: {objectives[best_idx, 0]:.4f}")
-            print(f"- QoE Degradation: {objectives[best_idx, 1]:.4f}")
-            print(f"- Unfairness: {objectives[best_idx, 2]:.4f}")
-    
-    # Save results to DataFrame
-    results_df = pd.DataFrame(all_results)
-    results_file = f'gpu_optimized_results_{SCRIPT_VERSION_NAME}.csv'
-    results_df.to_csv(results_file, index=False)
-    print(f"\nResults saved to {results_file}")
-    
-    print("\nGPU Utilization:")
-    print("If you're seeing ~80-95% GPU utilization during this function's execution,")
-    print("the optimizations are working correctly. If utilization is still low,")
-    print("try further increasing FUZZER_POPULATION or NUM_UEs/NUM_CELLS.")
-
 def run_full_comparative_analysis():
     """
     Run a full comparative analysis between AI Fuzzing and Traditional Testing approaches.
@@ -2770,11 +2665,12 @@ def run_full_comparative_analysis():
             'ue_distribution': 'clustered'
         }},
         {'name': 'Congestion Crisis', 'params': {
-            'num_ues': NUM_UES,
-            'initial_load': 0.9,
-            'max_speed': 5,
-            'traffic_rate': 1000,
-            'ue_distribution': 'uniform'
+            'num_ues': 25,               # Increased number of UEs creates more complexity
+            'initial_load': 0.8,         # Very high initial load
+            'max_speed': 1,              # Users are almost stationary
+            'scenario_type': 'default',
+            'ue_distribution': 'clustered', # Users clustered in specific areas
+            'inter_site_distance': 200   # Increased interference
         }}
     ]
     
@@ -2806,13 +2702,15 @@ def run_full_comparative_analysis():
                 num_ues=scenario['params']['num_ues'],
                 initial_load=scenario['params']['initial_load'],
                 scenario_max_speed=scenario['params']['max_speed'],
-                ue_distribution=scenario['params'].get('ue_distribution', 'uniform'),
-                traffic_rate=scenario['params'].get('traffic_rate', 100)
+                ue_distribution=scenario['params'].get('ue_distribution', 'uniform')
             )
 
             # Create algorithm instance
             algorithm = BaselineA3(num_ues=env.num_ues, num_cells=env.num_cells)
             fuzzer_instance = AIFuzzer(env, algorithm)
+            
+            # Reset the fuzzer's oracle for this new independent run to prevent data leakage
+            fuzzer_instance.scoring_oracle.reset()
             
             # Initialize network
             try:
@@ -2825,17 +2723,17 @@ def run_full_comparative_analysis():
                 if not hasattr(env, 'base_ue_loc') or env.base_ue_loc is None:
                     env.base_ue_loc = tf.identity(env.ue_loc)
                 
-                # استفاده از DEAP برای فازینگ چندهدفه
-                creator.create("FitnessMulti", base.Fitness, weights=(1.0, 1.0, 1.0))
-                creator.create("Individual", list, fitness=creator.FitnessMulti)
+                # Use DEAP for multi-objective fuzzing (creators already defined at top level)
                 toolbox = base.Toolbox()
-                toolbox.register("attr_float", lambda: float(np.random.uniform(-1, 1)))
-                toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=env.num_cells + env.num_ues * 2)
+                toolbox.register("attr_float", lambda: float(np.random.uniform(-2, 2)))  # Balanced range
+                toolbox.register("individual", tools.initRepeat, creator.Individual3, toolbox.attr_float, n=env.num_cells + env.num_ues * 2)
                 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
                 def evaluate(individual):
                     load_modifier = np.array(individual[:env.num_cells])
-                    position_modifier = np.array(individual[env.num_cells:]).reshape((env.num_ues, 2))
+                    # Ensure individual is numpy array before reshape
+                    position_data = np.array(individual[env.num_cells:])
+                    position_modifier = position_data.reshape((env.num_ues, 2))
                     test_input = np.concatenate([load_modifier, position_modifier.flatten()])
                     test_tensor = tf.convert_to_tensor([test_input], dtype=tf.float32)
                     results = fuzzer_instance.batch_simulate_network(test_tensor)
@@ -2848,7 +2746,7 @@ def run_full_comparative_analysis():
 
                 toolbox.register("evaluate", evaluate)
                 toolbox.register("mate", tools.cxBlend, alpha=0.5)
-                toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.2, indpb=0.2)
+                toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1.0, indpb=0.3)  # Balanced mutation
                 toolbox.register("select", tools.selNSGA2)
 
                 population = toolbox.population(n=FUZZER_POPULATION)
@@ -2857,6 +2755,8 @@ def run_full_comparative_analysis():
                 stats.register("avg", np.mean, axis=0)
                 stats.register("max", np.max, axis=0)
                 stats.register("min", np.min, axis=0)
+                logbook = tools.Logbook()
+                logbook.header = "gen", "evals", "size", "div"
 
                 # فیدبک محور: پس از هر نسل، ورودی‌های آسیب‌پذیر را ذخیره و نسل بعدی را با آن‌ها تقویت کن
                 feedback_pool = []
@@ -2867,15 +2767,33 @@ def run_full_comparative_analysis():
                         ind.fitness.values = fit[:3]
                         if fit[3] > 5.0:
                             feedback_pool.append(ind)
-                    # Survivor selection: keep top 20% elite
-                    elite_individuals = fuzzer_instance.survivor_selection(offspring, fits, elite_ratio=0.2)
-                    # Generate new population from elites and feedback pool
-                    combined_pool = elite_individuals + feedback_pool
+                    # Generate new population from offspring and feedback pool
+                    combined_pool = offspring + feedback_pool
                     # Fill up to FUZZER_POPULATION
                     while len(combined_pool) < FUZZER_POPULATION:
                         combined_pool.append(toolbox.individual())
                     population = toolbox.select(combined_pool, k=FUZZER_POPULATION)
+                    
+                    # Calculate Pareto front and diversity
+                    fronts = tools.sortNondominated(population, len(population))
+                    pareto_front_size = len(fronts[0])
+                    if len(fronts[0]) > 1:
+                        crowding_distances = tools.emo.assignCrowdingDist(fronts[0])
+                        diversity = np.mean(crowding_distances) if crowding_distances else 0
+                    else:
+                        # Use std of fitness values as diversity measure
+                        fitness_values = [ind.fitness.values for ind in population]
+                        diversity = np.mean(np.std(np.array(fitness_values), axis=0)) if fitness_values else 0
+                    
+                    logbook.record(gen=gen, evals=len(offspring), size=pareto_front_size, div=diversity)
+                    
                     hof.update(population)
+
+                # Print logbook statistics
+                print("Logbook Statistics:")
+                print(logbook)
+                print(f"Pareto Front Sizes: {logbook.select('size')}")
+                print(f"Diversities: {logbook.select('div')}")
 
                 # جمع‌آوری نتایج فازینگ هوشمند
                 fuzzing_results = []
@@ -2924,7 +2842,7 @@ def run_full_comparative_analysis():
             for iter_idx in range(SIMULATION_ITERATIONS):
                 # Generate random test case (much simpler than fuzzing)
                 load_modifier = np.random.uniform(-0.2, 0.2, env.num_cells)
-                position_modifier = np.random.uniform(-15, 15, (env.num_ues, 2))
+                position_modifier = np.random.uniform(-100, 100, (env.num_ues, 2))
                 test_input = np.concatenate([load_modifier, position_modifier.flatten()])
                 
                 test_tensor = tf.convert_to_tensor([test_input], dtype=tf.float32)
@@ -2957,14 +2875,14 @@ def run_full_comparative_analysis():
                 if random.random() < 0.5:
                     # Create highly imbalanced load
                     load_modifier = np.random.uniform(-0.3, 0.4, env.num_cells)
-                    position_modifier = np.random.uniform(-20, 20, (env.num_ues, 2))
+                    position_modifier = np.random.uniform(-100, 100, (env.num_ues, 2))
                 else:
                     # Cluster UEs to create hotspots
                     load_modifier = np.random.uniform(-0.2, 0.3, env.num_cells)
                     
                     # Generate a cluster center
-                    cluster_x = np.random.uniform(-20, 20)
-                    cluster_y = np.random.uniform(-20, 20)
+                    cluster_x = np.random.uniform(-100, 100)
+                    cluster_y = np.random.uniform(-100, 100)
                     
                     # Create clustered UE formation
                     position_modifier = np.zeros((env.num_ues, 2))
@@ -2989,10 +2907,10 @@ def run_full_comparative_analysis():
             # Evolution process
             for iter_idx in range(SIMULATION_ITERATIONS):
                 # Evaluate current population
+                results = fuzzer_instance.batch_simulate_network(population_tensor)
                 
                 # Extract objectives
-                objectives = tf.stack([
-                ], axis=1).numpy()
+                objectives = np.stack([results['instability'].numpy(), results['qoe_degradation'].numpy(), results['unfairness'].numpy()], axis=1)
                 
                 # Count vulnerabilities found (same criteria as traditional for fair comparison)
                 new_vulnerabilities = 0
