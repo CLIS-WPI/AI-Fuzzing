@@ -116,7 +116,7 @@ NOISE_POWER_DBM_PER_HZ = -174
 # For a real paper submission, this should be increased to at least 200.
 NUM_INDEPENDENT_RUNS = 5    # Reduced for faster execution
 SIMULATION_ITERATIONS = 10   # Reduced for faster execution
-FUZZER_GENERATIONS = 15  # Reduced for faster execution
+FUZZER_GENERATIONS = 25  # Reduced for faster execution
 FUZZER_POPULATION = 40  # Reduced for faster execution
 
 # Use NSGA-II for multi-objective optimization as described in the paper

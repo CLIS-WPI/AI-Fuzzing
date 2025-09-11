@@ -1,118 +1,16 @@
-python3 run_ai_fuzzing.py 
-  File "/workspace/run_ai_fuzzing.py", line 1
-    from deap import base, creator, tools, algorithms
-IndentationError: unexpected indent
-root@ab8776707e44:/workspace# ^C
-root@ab8776707e44:/workspace# python3 run_ai_fuzzing.py 
-2025-09-05 19:04:04.868670: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-2025-09-05 19:04:04.921354: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
-To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
-GPU optimization configured for 1 devices
---- Starting AI Fuzzing vs Traditional Testing Comparison (v28_strategic_fuzzing) ---
---- Statistical Analysis Configuration: ---
-  - 3 independent runs with different random seeds
-  - 10 iterations per run
-  - Total iterations: 30 per algorithm
-  - Network: 8 cells, 32 UEs
-  - Fuzzer population: 100 individuals
-Found 1 GPUs. Configuring GPU settings...
-Memory growth enabled for all GPUs
-XLA compilation and mixed precision enabled
+05359402]  0  
+11      50      15      [0.90479999 0.08587397 0.3319251 ]      [0.0664     0.02104705 0.05345551]  0  
+12      50      15      [0.9064     0.08525266 0.32879511]      [0.0672238  0.02162009 0.05354491]  0  
+13      50      15      [0.90159999 0.08673112 0.33101752]      [0.06703313 0.0219942  0.05499032]  0  
+14      50      17      [0.90079999 0.08764174 0.32931175]      [0.06939279 0.02325297 0.05812666]  0  
+15      50      17      [0.90079999 0.08844641 0.32849614]      [0.06939279 0.02448107 0.05636861]  0  
+16      50      18      [0.9048     0.08664792 0.32602023]      [0.06735696 0.02562351 0.05332957]  0  
+17      50      20      [0.90799999 0.08489448 0.32449639]      [0.068      0.02596465 0.05320574]  0  
+18      50      21      [0.91039999 0.08365492 0.32206485]      [0.06767451 0.02559992 0.05256075]  0  
+19      50      17      [0.91359999 0.08097803 0.32015784]      [0.06852036 0.0240818  0.05239837]  0  
+                                                                   Completed Congestion Crisis scenario with 300 results                
+Running: Congestion Crisis: 100%|████| 6/6 [22:10<00:00, 221.80s/it]
 
---- Running full comparative analysis ---
-
---- Running Full Comparative Analysis with Statistical Validation ---
-
-Running 4 scenarios with 3 independent runs each
-Overall Progress:   0%|                             | 0/24 [00:00<?, ?it/s]
---- Processing Scenario: Stable Network ---
-
-Error in comparative analysis: NetworkEnvironment.__init__() got an unexpected keyword argument 'traffic_rate'
-Continuing with main simulation...
-Overall Progress:   0%|                             | 0/24 [00:00<?, ?it/s]
---- GPU configuration successful ---
-Running: Stable Mobility:   0%|                      | 0/6 [00:00<?, ?it/s]
---- Running Scenario: Stable Mobility ---
-WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1757113448.007257   70362 gpu_device.cc:2020] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 92981 MB memory:  -> device: 0, name: NVIDIA H100 NVL, pci bus id: 0000:43:00.0, compute capability: 9.0
-                                                                          I0000 00:00:1757113454.125852   70362 auto_mixed_precision.cc:1511] No allowlist ops found, nothing to do
-2025-09-05 19:04:16.248094: I external/local_xla/xla/service/service.cc:163] XLA service 0x21844950 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
-2025-09-05 19:04:16.248121: I external/local_xla/xla/service/service.cc:171]   StreamExecutor device (0): NVIDIA H100 NVL, Compute Capability 9.0
-2025-09-05 19:04:16.464567: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
-2025-09-05 19:04:16.465445: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
-2025-09-05 19:04:16.465474: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
-2025-09-05 19:04:16.465500: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
-2025-09-05 19:04:16.465725: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
-2025-09-05 19:04:16.465749: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
-2025-09-05 19:04:16.469898: I tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.cc:269] disabling MLIR crash reproducer, set env var `MLIR_CRASH_REPRODUCER_DIRECTORY` to enable.
-2025-09-05 19:04:17.366608: I external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:473] Loaded cuDNN version 90701
-2025-09-05 19:04:27.871184: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_6', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_add_subtract_fusion', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_5', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 32 bytes spill stores, 32 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 8 bytes spill stores, 8 bytes spill loads
-
-I0000 00:00:1757113467.946810   70362 device_compiler.h:196] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
-                                                                          Completed Stable Mobility scenario with 180 results                         
-Running: Stable High Load:  17%|█▋        | 1/6 [15:57<1:19:45, 957.20s/it]
---- Running Scenario: Stable High Load ---                                 
-                                                                          2025-09-05 19:20:07.284831: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
-2025-09-05 19:20:07.285714: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
-2025-09-05 19:20:07.285745: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
-2025-09-05 19:20:07.285772: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
-2025-09-05 19:20:07.285993: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
-2025-09-05 19:20:07.286017: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
-2025-09-05 19:20:18.236575: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_6', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_add_subtract_fusion', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_5', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 32 bytes spill stores, 32 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 8 bytes spill stores, 8 bytes spill loads
-
-                                                                          Completed Stable High Load scenario with 180 results                        
-Running: Load Imbalance:  33%|████        | 2/6 [31:47<1:03:33, 953.28s/it]
---- Running Scenario: Load Imbalance ---                                   
-                                                                          2025-09-05 19:35:58.411941: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
-2025-09-05 19:35:58.412890: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
-2025-09-05 19:35:58.412921: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_1/Assert/Assert
-2025-09-05 19:35:58.412951: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_2/Assert/Assert
-2025-09-05 19:35:58.413191: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal_1/Assert/Assert
-2025-09-05 19:35:58.413217: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal_3/Assert/Assert
-2025-09-05 19:36:09.767496: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_6', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_add_subtract_fusion', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_5', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 32 bytes spill stores, 32 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 8 bytes spill stores, 8 bytes spill loads
-
-                                                                          Completed Load Imbalance scenario with 180 results                          
-Running: Coverage Hole:  50%|███████▌       | 3/6 [49:06<49:36, 992.33s/it]
---- Running Scenario: Coverage Hole ---                                    
-                                                                          2025-09-05 19:53:16.623549: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_greater_equal/Assert/Assert
-2025-09-05 19:53:16.624438: W tensorflow/compiler/tf2xla/kernels/assert_op.cc:39] Ignoring Assert operator assert_less_equal/Assert/Assert
-2025-09-05 19:53:28.008759: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion_1', 28 bytes spill stores, 12 bytes spill loads
-
-                                                                          Completed Coverage Hole scenario with 180 results                           
-Running: High Interference:  67%|██████   | 4/6 [1:04:48<32:25, 972.60s/it]
---- Running Scenario: High Interference ---                                
-                                                                          2025-09-05 20:09:10.229904: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'loop_transpose_fusion', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_reduce_fusion_6', 4 bytes spill stores, 4 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_add_subtract_fusion', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_5', 8 bytes spill stores, 8 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'loop_atan2_complex_fusion', 32 bytes spill stores, 32 bytes spill loads
-ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_3', 8 bytes spill stores, 8 bytes spill loads
-
-                                                                          Completed High Interference scenario with 180 results                       
-Running: Congestion Crisis:  83%|███████▌ | 5/6 [1:20:32<16:02, 962.19s/it]
---- Running Scenario: Congestion Crisis ---                                
-                                                                          2025-09-05 20:24:54.870000: I external/local_xla/xla/stream_executor/cuda/subprocess_compilation.cc:346] ptxas warning : Registers are spilled to local memory in function 'input_concatenate_fusion_5', 8 bytes spill stores, 8 bytes spill loads
-
-                                                                          Completed Congestion Crisis scenario with 180 results                       
-Running: Congestion Crisis: 100%|█████████| 6/6 [1:37:47<00:00, 977.94s/it]
-                                                                           
 --- Finalizing script: Saving results... ---
 
 --- Results saved to fuzzing_results_v28_strategic_fuzzing.csv ---
@@ -123,46 +21,45 @@ COMPREHENSIVE STATISTICAL ANALYSIS - AI FUZZING vs TRADITIONAL TESTING
 
 OVERALL FUZZER EFFECTIVENESS ACROSS ALL SCENARIOS:
   AI-Fuzzing:
-    Total Vulnerabilities Found: 694
-    Total CRITICAL FAILURES Found: 12
-    Average Vulnerability Severity: 2.26
+    Total Vulnerabilities Found: 1691
+    Total CRITICAL FAILURES Found: 5
+    Average Vulnerability Severity: 3.51
   Traditional-Testing:
-    Total Vulnerabilities Found: 767
-    Total CRITICAL FAILURES Found: 6
-    Average Vulnerability Severity: 2.41
+    Total Vulnerabilities Found: 1187
+    Total CRITICAL FAILURES Found: 9
+    Average Vulnerability Severity: 2.33
 
 PER-RUN STATISTICS (averaged over all scenarios):
   AI-Fuzzing:
-    Average Critical Failures per Run: 0.22 ± 0.63
-    Average Vulnerabilities per Run: 12.85 ± 9.54
+    Average Critical Failures per Run: 0.06 ± 0.27
+    Average Vulnerabilities per Run: 18.79 ± 5.17
   Traditional-Testing:
-    Average Critical Failures per Run: 0.11 ± 0.31
-    Average Vulnerabilities per Run: 14.20 ± 7.84
+    Average Critical Failures per Run: 0.10 ± 0.30
+    Average Vulnerabilities per Run: 13.19 ± 7.91
 
 STATISTICAL SIGNIFICANCE TESTS:
 T-TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):
-  T-statistic: 1.151, P-value: 0.12661
+  T-statistic: -1.033, P-value: 0.84853
   Result: No statistically significant difference found in critical failures.
 
 T-TEST for TOTAL VULNERABILITIES (One-sided: AI Fuzzing > Traditional Testing):
-  T-statistic: -0.797, P-value: 0.78633
-  Result: No statistically significant difference found in vulnerabilities.
+  T-statistic: 5.591, P-value: 0.00000
+  Result: AI Fuzzing found a statistically significant GREATER number of vulnerabilities (p = 0.00000).
 
 MANN-WHITNEY U TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):
-  U-statistic: 1518.000, P-value: 0.26512
+  U-statistic: 3829.500, P-value: 0.92072
   Result: No statistically significant difference found in critical failures (non-parametric test).
 
 95% CONFIDENCE INTERVALS for CRITICAL FAILURES:
-  AI Fuzzing: 0.22 [0.05, 0.40]
-  Traditional Testing: 0.11 [0.02, 0.20]
+  AI Fuzzing: 0.06 [-0.00, 0.11]
+  Traditional Testing: 0.10 [0.04, 0.16]
 
-EFFECT SIZE (Cohen's d): 0.224
-  Interpretation: Medium effect size
+EFFECT SIZE (Cohen's d): -0.155
+  Interpretation: Small effect size
 
 ================================================================================
 GENERATING PLOTS FOR PAPER
 ================================================================================
 Consolidated 2x2 plot saved to plots_v28_strategic_fuzzing/ai_fuzzing_vs_traditional_testing.pdf
 
---- Simulation Finished in 5868.73 seconds ---
-root@ab8776707e44:/workspace# 
+--- Simulation Finished in 1783.25 seconds ---

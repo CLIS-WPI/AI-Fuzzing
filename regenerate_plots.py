@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced high-quality plots generator for the 
-AI-Fuzzing for 5G Traffic Steering ICC paper.
-Generates all 6 key figures needed for the publication.
+Essential plots generator for AI-Fuzzing 5G Traffic Steering Paper
+Generates 4 key publication-quality figures
 """
 
 import os
@@ -11,30 +10,36 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib.patches import Rectangle
 from scipy import stats
+from scipy.stats import mannwhitneyu
+import warnings
+warnings.filterwarnings('ignore')
 
 # --- Constants ---
 CSV_FILENAME = "fuzzing_results_v28_strategic_fuzzing.csv"
-OUTPUT_DIR = "plots_v28_strategic_fuzzing"
+OUTPUT_DIR = "plots_essential_paper"
 
-# Set professional plotting style with increased font brightness/clarity
+# Set professional plotting style for journal publication
 plt.rcParams.update({
-    'font.size': 14,                  # Increased from 12
-    'axes.titlesize': 16,             # Increased from 14
-    'axes.labelsize': 14,             # Increased from 12
-    'xtick.labelsize': 12,            # Increased from 10
-    'ytick.labelsize': 12,            # Increased from 10
-    'legend.fontsize': 12,            # Increased from 10
-    'figure.titlesize': 18,           # Increased from 16
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 11,
+    'ytick.labelsize': 11,
+    'legend.fontsize': 11,
+    'figure.titlesize': 16,
     'font.family': 'serif',
     'font.serif': ['Times New Roman', 'DejaVu Serif'],
     'text.usetex': False,
-    'font.weight': 'bold',            # Added bold font weight
-    'axes.titleweight': 'bold',       # Bold title
-    'axes.labelweight': 'medium',     # Medium weight for labels
+    'font.weight': 'normal',
+    'axes.titleweight': 'bold',
+    'axes.labelweight': 'normal',
     'axes.grid': True,
-    'grid.alpha': 0.3
+    'grid.alpha': 0.3,
+    'figure.facecolor': 'white',
+    'axes.facecolor': 'white',
+    'axes.edgecolor': 'black',
+    'axes.linewidth': 1.0
 })
 
 def load_and_prepare_data(csv_file):
@@ -47,507 +52,578 @@ def load_and_prepare_data(csv_file):
     df = pd.read_csv(csv_file)
     print(f"Successfully loaded {len(df)} rows of data.")
     
-    # Keep the actual fuzzer names as they are
-    # The original CSV already has 'AI-Fuzzing' and 'Traditional-Testing'
+    # Clean and prepare data
     df['fuzzer_type'] = df['fuzzer_type']
     
     # Ensure boolean columns are correctly typed
     for col in ['is_critical_failure', 'has_ping_pong', 'has_qoe_violation', 'has_unfairness']:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: str(x).strip().lower() == 'true' if pd.notna(x) else False)
-            
+    
+    # Add severity categories based on vulnerability characteristics
+    def categorize_severity(row):
+        if row['is_critical_failure']:
+            return 'Critical'
+        elif row['has_ping_pong'] and row['has_qoe_violation']:
+            return 'High'
+        elif row['has_ping_pong'] or row['has_qoe_violation']:
+            return 'Medium'
+        elif row['vulnerability_count'] > 0:
+            return 'Low'
+        else:
+            return 'None'
+    
+    df['severity'] = df.apply(categorize_severity, axis=1)
+    
     return df
 
-def create_fig1_main_comparison(df, output_dir):
-    """Figure 1: Main effectiveness comparison - the most important plot."""
-    print("Generating Figure 1: Main Effectiveness Comparison...")
+def create_plot1_vulnerability_discovery_comparison(df, output_dir):
+    """
+    Plot 1: Vulnerability Discovery Comparison
+    Enhanced bar chart with confidence intervals, effect size, and statistical analysis
+    """
+    print("Generating Plot 1: Vulnerability Discovery Comparison...")
     
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
+    # Filter data for the two main approaches
+    comparison_data = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # Calculate detailed statistics
+    stats_data = []
+    raw_data = {}
     
-    # Left subplot: Total Critical Failures
-    total_critical = fuzzing_df.groupby('fuzzer_type')['is_critical_failure'].sum().reset_index()
-    colors = ['#2ca02c', '#ff7f0e']  # Green for AI-Fuzzing, Orange for Traditional Testing
+    for fuzzer_type in ['Traditional-Testing', 'AI-Fuzzing']:
+        fuzzer_data = comparison_data[comparison_data['fuzzer_type'] == fuzzer_type]
+        
+        # Group by run (scenario + iteration) to get per-run vulnerability counts
+        run_vulns = fuzzer_data.groupby(['scenario', 'iteration'])['vulnerability_count'].sum()
+        raw_data[fuzzer_type] = run_vulns.values
+        
+        total_vulns = fuzzer_data['vulnerability_count'].sum()
+        mean_vulns = run_vulns.mean()
+        std_vulns = run_vulns.std()
+        n_runs = len(run_vulns)
+        se_vulns = std_vulns / np.sqrt(n_runs)  # Standard error
+        ci_95 = 1.96 * se_vulns  # 95% confidence interval
+        
+        stats_data.append({
+            'fuzzer_type': fuzzer_type,
+            'total_vulnerabilities': total_vulns,
+            'mean_vulnerabilities': mean_vulns,
+            'std_vulnerabilities': std_vulns,
+            'ci_95': ci_95,
+            'n_runs': n_runs,
+            'se': se_vulns
+        })
     
-    bars = ax1.bar(total_critical['fuzzer_type'], total_critical['is_critical_failure'], 
-                   color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+    # Statistical tests
+    traditional_runs = raw_data['Traditional-Testing']
+    ai_runs = raw_data['AI-Fuzzing']
     
-    # Add value labels on bars
-    for bar in bars:
+    # Mann-Whitney U test
+    u_stat, p_value = mannwhitneyu(ai_runs, traditional_runs, alternative='greater')
+    
+    # Effect size (Cohen's d)
+    pooled_std = np.sqrt(((len(traditional_runs) - 1) * np.std(traditional_runs, ddof=1)**2 + 
+                         (len(ai_runs) - 1) * np.std(ai_runs, ddof=1)**2) / 
+                        (len(traditional_runs) + len(ai_runs) - 2))
+    cohens_d = (np.mean(ai_runs) - np.mean(traditional_runs)) / pooled_std
+    
+    # Create enhanced plot
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8), facecolor='white')
+    
+    fuzzer_types = [data['fuzzer_type'] for data in stats_data]
+    means = [data['mean_vulnerabilities'] for data in stats_data]
+    cis = [data['ci_95'] for data in stats_data]
+    n_runs = [data['n_runs'] for data in stats_data]
+    
+    # Beautiful vibrant colors for publication
+    colors = ['#FF6B6B', '#4ECDC4']  # Coral Red for Traditional, Teal for AI
+    edge_colors = ['#E74C3C', '#16A085']  # Darker edges for contrast
+    
+    # Create bars with error bars
+    bars = ax.bar(fuzzer_types, means, color=colors, alpha=0.8, 
+                  yerr=cis, capsize=8, 
+                  edgecolor=edge_colors, linewidth=2)
+    
+    # Set larger font sizes for tick labels
+    ax.tick_params(axis='x', labelsize=24)
+    ax.tick_params(axis='y', labelsize=24)
+    
+    # Add mean ± CI labels on bars
+    for i, (bar, mean_val, ci_val) in enumerate(zip(bars, means, cis)):
         height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height + 2,
-                f'{int(height)}', ha='center', va='bottom', fontweight='bold', fontsize=14)
+        ax.text(bar.get_x() + bar.get_width()/2., height + ci_val + 0.2,
+                f'{mean_val:.1f} ± {ci_val:.1f}', 
+                ha='center', va='bottom', fontweight='bold', fontsize=26)
     
-    ax1.set_title('Critical Failures Discovered', fontsize=14, pad=15)
-    ax1.set_ylabel('Total Count', fontsize=12)
-    ax1.set_ylim(0, max(total_critical['is_critical_failure']) * 1.15)
-    
-    # Right subplot: Total Vulnerabilities
-    total_vulns = fuzzing_df.groupby('fuzzer_type')['vulnerability_count'].sum().reset_index()
-    
-    bars2 = ax2.bar(total_vulns['fuzzer_type'], total_vulns['vulnerability_count'], 
-                    color=colors, alpha=0.8, edgecolor='black', linewidth=1)
-    
-    for bar in bars2:
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2., height + 20,
-                f'{int(height)}', ha='center', va='bottom', fontweight='bold', fontsize=14)
-    
-    ax2.set_title('Total Vulnerabilities Found', fontsize=14, pad=15)
-    ax2.set_ylabel('Total Count', fontsize=12)
-    ax2.set_ylim(0, max(total_vulns['vulnerability_count']) * 1.1)
-    
-    # Add significance annotation
-    y_max = max(total_critical['is_critical_failure'])
-    ax1.annotate('p < 0.0001', xy=(0.5, y_max * 0.9), fontsize=12, 
-                ha='center', fontweight='bold', 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
-    
-    plt.suptitle('AI Fuzzing vs Traditional Testing: Vulnerability Discovery', fontsize=16, y=0.98)
-    plt.tight_layout()
-    
-    output_path = os.path.join(output_dir, 'fig_1_main_effectiveness.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_1_main_effectiveness.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"-> Figure 1 saved to {output_path}")
-
-def create_fig2_qoe_performance(df, output_dir):
-    """Figure 2: QoE Performance CDFs - shows impact on network performance."""
-    print("Generating Figure 2: QoE Performance Analysis...")
-    
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
-    scenarios = ['Stable Mobility', 'Stable High Load', 'Load Imbalance', 'Coverage Hole']
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    axes = axes.flatten()
-    
-    colors = {'Traditional-Testing': '#ff7f0e', 'AI-Fuzzing': '#2ca02c'}
-    linestyles = {'Traditional-Testing': '--', 'AI-Fuzzing': '-'}
-    
-    for i, scenario in enumerate(scenarios[:4]):
-        ax = axes[i]
-        scenario_df = fuzzing_df[fuzzing_df['scenario'] == scenario]
-        
-        for fuzzer in ['Traditional-Testing', 'AI-Fuzzing']:
-            data = scenario_df[scenario_df['fuzzer_type'] == fuzzer]['throughput_5th_percentile_mbps']
-            data = data.dropna().sort_values().reset_index(drop=True)
-            
-            if not data.empty:
-                y = np.linspace(0, 1, len(data))
-                ax.plot(data, y, label=fuzzer, color=colors[fuzzer], 
-                       linestyle=linestyles[fuzzer], linewidth=3.0)  # Thicker lines for better visibility
-        
-        # Add subplot labels (a), (b), (c), (d)
-        subplot_labels = ['(a)', '(b)', '(c)', '(d)']
-        ax.set_title(f'{subplot_labels[i]} {scenario}', fontsize=14, fontweight='bold')
-        ax.set_xlabel('5th Percentile Throughput (Mbps)', fontsize=13, fontweight='medium')
-        ax.set_ylabel('Cumulative Probability', fontsize=13, fontweight='medium')
-        ax.legend(fontsize=12, framealpha=0.9)  # Increased font size and frame opacity
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 25)
-    
-    # Removed the main title "Impact on Network QoE: Lower is Worse (AI-Fuzzer Creates Worst Conditions)"
-    plt.tight_layout()
-    
-    output_path = os.path.join(output_dir, 'fig_2_qoe_performance.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_2_qoe_performance.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"-> Figure 2 saved to {output_path}")
-
-def create_fig3_vulnerability_heatmap(df, output_dir):
-    """Figure 3: Vulnerability type breakdown across scenarios."""
-    print("Generating Figure 3: Vulnerability Breakdown Heatmap...")
-
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
-
-    # Create vulnerability breakdown
-    vuln_types = ['has_ping_pong', 'has_qoe_violation', 'has_unfairness', 'is_critical_failure']
-    vuln_labels = ['Ping-Pong\nHandovers', 'QoE\nViolations', 'Unfairness\nEvents', 'Critical\nFailures']
-
-    fig, axes = plt.subplots(1, 2, figsize=(18, 8)) # Adjusted for 2 instead of 3 fuzzers
-
-    scenarios = fuzzing_df['scenario'].unique()
-
-    for i, fuzzer in enumerate(['Traditional-Testing', 'AI-Fuzzing']):
-        fuzzer_df = fuzzing_df[fuzzing_df['fuzzer_type'] == fuzzer]
-
-        # Create matrix for heatmap
-        heatmap_data = []
-        for scenario in scenarios:
-            scenario_data = []
-            scenario_df = fuzzer_df[fuzzer_df['scenario'] == scenario]
-            for vuln_type in vuln_types:
-                count = scenario_df[vuln_type].sum() if vuln_type in scenario_df.columns else 0
-                scenario_data.append(count)
-            heatmap_data.append(scenario_data)
-
-        heatmap_matrix = np.array(heatmap_data)
-
-        # Create heatmap with stronger contrast
-        im = axes[i].imshow(heatmap_matrix, cmap='Reds', aspect='auto', vmin=0, 
-                          vmax=max(1, np.max(heatmap_matrix) * 1.1))  # Improve color contrast
-
-        # Add text annotations with increased font size and better visibility
-        for row in range(len(scenarios)):
-            for col in range(len(vuln_types)):
-                value = int(heatmap_matrix[row, col])
-                # Change text color based on cell value for better contrast
-                text_color = "black" if value < np.max(heatmap_matrix) * 0.7 else "white"
-                text = axes[i].text(col, row, f'{value}',
-                                  ha="center", va="center", 
-                                  color=text_color, 
-                                  fontweight='bold', 
-                                  fontsize=16)  # Increased from 14
-        
-        # Set main title (fuzzer name)
-        axes[i].set_title(f'{fuzzer}', fontsize=20, fontweight='bold')
-        
-        # Add (a), (b), (c) labels under the titles with adjusted positioning
-        # Moving them further down to avoid crossing with the subtitle
-        subplot_labels = ['(a)', '(b)', '(c)']
-        axes[i].text(0.5, -0.2, subplot_labels[i], transform=axes[i].transAxes,
-                    ha='center', va='center', fontsize=18, fontweight='bold')
-        axes[i].set_xticks(range(len(vuln_labels)))
-        axes[i].set_xticklabels(vuln_labels, rotation=45, ha='right', fontsize=16, fontweight='medium') # Increased size
-        axes[i].set_yticks(range(len(scenarios)))
-        axes[i].set_yticklabels(scenarios, fontsize=16, fontweight='medium') # Increased size
-
-        # Add colorbar with better visibility
-        cbar = plt.colorbar(im, ax=axes[i], shrink=0.6)
-        cbar.ax.tick_params(labelsize=14, labelcolor='black') # Increased size and ensured black color
-
-    # Removed the main title "Vulnerability Discovery Pattern Analysis"
-    plt.tight_layout()
-
-    output_path = os.path.join(output_dir, 'fig_3_vulnerability_heatmap.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_3_vulnerability_heatmap.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    print(f"-> Figure 3 saved to {output_path}")
-
-def create_fig4_statistical_analysis(df, output_dir):
-    """Figure 4: Statistical significance analysis with box plots demonstrating AI-Fuzzing superiority."""
-    print("Generating Figure 4: Statistical Analysis...")
-    
-    # Filter for our two testing approaches
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    
-    # Left: Box plot of critical failures per run
-    critical_per_run = fuzzing_df.groupby(['fuzzer_type', 'scenario', 'algorithm'])['is_critical_failure'].sum().reset_index()
-    vulnerability_per_run = fuzzing_df.groupby(['fuzzer_type', 'scenario', 'algorithm'])['vulnerability_count'].sum().reset_index()
-    
-    # Calculate p-value for statistical significance
-    trad_failures = critical_per_run[critical_per_run['fuzzer_type'] == 'Traditional-Testing']['is_critical_failure']
-    ai_failures = critical_per_run[critical_per_run['fuzzer_type'] == 'AI-Fuzzing']['is_critical_failure']
-    
-    # Use Mann-Whitney U test (non-parametric) for comparison
-    from scipy import stats
-    u_stat, p_value = stats.mannwhitneyu(ai_failures, trad_failures, alternative='greater')
-    
-    box_plot = ax1.boxplot([
-        critical_per_run[critical_per_run['fuzzer_type'] == 'Traditional-Testing']['is_critical_failure'],
-        critical_per_run[critical_per_run['fuzzer_type'] == 'AI-Fuzzing']['is_critical_failure']
-    ], labels=['Traditional\nTesting', 'AI-Fuzzing'], patch_artist=True)
-    
-    colors = ['#ff7f0e', '#2ca02c']  # Orange for Traditional, Green for AI-Fuzzing
-    for patch, color in zip(box_plot['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
-    
-    # Add statistical significance annotation
+    # Statistical significance annotation with detailed info
+    max_height = max([m + c for m, c in zip(means, cis)])
     significance = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "ns"
-    ax1.text(1.5, max(ai_failures.max(), trad_failures.max()) * 1.1, 
-             f'p = {p_value:.4f} {significance}',
-             ha='center', va='bottom', fontsize=12, fontweight='bold')
     
-    ax1.set_title('Critical Vulnerabilities Found\n(AI-Fuzzing vs Traditional Testing)', fontsize=14, fontweight='bold')
-    ax1.set_ylabel('Number of Critical Vulnerabilities', fontsize=12)
-    ax1.grid(True, alpha=0.3)
+    # Add significance bracket
+    y_bracket = max_height * 1.15
+    ax.plot([0, 1], [y_bracket, y_bracket], 'k-', linewidth=1)
+    ax.plot([0, 0], [y_bracket-0.3, y_bracket], 'k-', linewidth=1)
+    ax.plot([1, 1], [y_bracket-0.3, y_bracket], 'k-', linewidth=1)
     
-    # Right: Comparison across different algorithms/scenarios
-    # Use vulnerability count as the main metric
-    bar_data = fuzzing_df.groupby(['fuzzer_type', 'algorithm'])['vulnerability_count'].sum().unstack(fill_value=0)
+    ax.text(0.5, y_bracket + 0.5, f'p = {p_value:.4f} {significance}', 
+            ha='center', va='bottom', fontsize=28, fontweight='bold')
     
-    bar_data.plot(kind='bar', ax=ax2, width=0.7, alpha=0.8, color=colors)
-    ax2.set_title('Vulnerability Detection Effectiveness\nAcross Different Algorithms', fontsize=14, fontweight='bold')
-    ax2.set_ylabel('Total Vulnerabilities Detected', fontsize=12)
-    ax2.set_xlabel('Testing Approach', fontsize=12)
-    ax2.legend(title='Traffic Steering\nAlgorithm', bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax2.tick_params(axis='x', rotation=45)
+    # Calculate improvement percentage
+    improvement = ((means[1] - means[0]) / means[0]) * 100
     
-    # Add an annotation highlighting the statistical significance
-    fig.text(0.5, 0.01, 
-             f"Statistical analysis confirms AI-Fuzzing significantly outperforms Traditional Testing (p-value: {p_value:.4f})",
-             ha='center', fontsize=12, style='italic', bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.5))
+    # Remove title for cleaner appearance - title info moved to caption
+    ax.set_ylabel('Mean Vulnerabilities per Run', fontsize=30, fontweight='bold')
+    ax.set_ylim(-6.0, max_height * 1.3)  # Maximum extended lower limit for huge gap
     
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    # Add grid for better readability
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_axisbelow(True)
     
-    output_path = os.path.join(output_dir, 'fig_4_statistical_analysis.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_4_statistical_analysis.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+    # Add sample size annotations under bars
+    for i, (bar, n) in enumerate(zip(bars, n_runs)):
+        ax.text(bar.get_x() + bar.get_width()/2., -3.5,
+                f'n = {n}', ha='center', va='top', fontsize=24, fontweight='bold')
     
-    print(f"-> Figure 4 saved to {output_path}")
-
-def create_fig5_scenario_comparison(df, output_dir):
-    """Figure 5: Scenario-wise detailed comparison between AI-Fuzzing and Traditional Testing."""
-    print("Generating Figure 5: Scenario Comparison...")
-
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
-
-    # Create scenario comparison
-    scenario_summary = fuzzing_df.groupby(['scenario', 'fuzzer_type']).agg({
-        'is_critical_failure': 'sum',
-        'vulnerability_count': 'sum',
-        'handover_rate': 'mean',
-        'jain_fairness_index': 'mean'
-    }).round(2)
-
-    scenarios = fuzzing_df['scenario'].unique()
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12)) # Maintained larger figure size
-    axes = axes.flatten()
-
-    metrics = [
-        ('is_critical_failure', 'Critical Failures'),
-        ('vulnerability_count', 'Total Vulnerabilities'),
-        ('handover_rate', 'Average Handover Rate'),
-        ('jain_fairness_index', 'Jain Fairness Index')
-    ]
-
-    for i, (metric, title) in enumerate(metrics):
-        ax = axes[i]
-
-        data_to_plot = []
-        labels = []
-        for scenario in scenarios:
-            scenario_data = []
-            for fuzzer in ['Traditional-Testing', 'AI-Fuzzing']:
-                try:
-                    value = scenario_summary.loc[(scenario, fuzzer), metric]
-                    scenario_data.append(value)
-                except KeyError:
-                    scenario_data.append(0)
-            data_to_plot.append(scenario_data)
-            labels.append(scenario)
-
-        x = np.arange(len(scenarios))
-        width = 0.35  # Wider bars since we only have two approaches now
-
-        colors = ['#ff7f0e', '#2ca02c']  # Traditional Testing in orange, AI-Fuzzing in green
-        fuzzer_names = ['Traditional-Testing', 'AI-Fuzzing']
-
-        for j, (fuzzer, color) in enumerate(zip(fuzzer_names, colors)):
-            values = [data_to_plot[k][j] for k in range(len(scenarios))]
-            # Add black edge to bars for better clarity
-            bars = ax.bar(x + j*width, values, width, label=fuzzer, color=color, 
-                         alpha=0.85, # Increased from 0.8
-                         edgecolor='black', linewidth=0.8) # Added black border for contrast
-            
-            # Add value labels on top of bars for metrics with discrete counts
-            if metric in ['is_critical_failure', 'vulnerability_count']:
-                for k, bar in enumerate(bars):
-                    height = bar.get_height()
-                    if height > 0:  # Only add labels to non-zero bars
-                        # Position the text with slightly more vertical offset
-                        ax.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-                              f'{int(height)}', ha='center', va='bottom', 
-                              fontsize=11, fontweight='bold')
-
-        # Replace subplot titles with just (a), (b), (c), (d) labels
-        subplot_labels = ['(a)', '(b)', '(c)', '(d)']
-        ax.set_title(f"{subplot_labels[i]}", fontsize=18, fontweight='bold')
-        
-        ax.set_xlabel('Scenario', fontsize=16, fontweight='medium')
-        
-        # Set specific y-axis labels based on the metric
-        y_labels = {
-            'is_critical_failure': 'Number of Critical Failures',
-            'vulnerability_count': 'Number of Vulnerabilities',
-            'handover_rate': 'Handover Rate (per second)',
-            'jain_fairness_index': 'Fairness Index (0-1)'
-        }
-        ax.set_ylabel(y_labels[metric], fontsize=16, fontweight='medium')
-        
-        # For subplots (a) and (b), adjust the y-axis limit to ensure number labels don't cross lines
-        if metric in ['is_critical_failure', 'vulnerability_count']:
-            # Get current y-limit
-            current_ylim = ax.get_ylim()
-            # Find the maximum value in the plot
-            max_val = 0
-            for j in range(len(scenarios)):
-                for k in range(2):  # 2 approaches: Traditional-Testing and AI-Fuzzing
-                    try:
-                        val = data_to_plot[j][k]
-                        if val > max_val:
-                            max_val = val
-                    except:
-                        pass
-            # Set new y-limit with extra 20% padding on top for the labels
-            ax.set_ylim(0, max(current_ylim[1], max_val * 1.2))
-        ax.set_xticks(x + width/2)  # Center x-ticks between the two bars
-        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=14, fontweight='medium')
-        ax.tick_params(axis='y', labelsize=14)
-        ax.grid(True, alpha=0.3)
-
-    # Add a single legend for the entire figure at the bottom
-    fig.legend(['Traditional-Testing', 'AI-Fuzzing'], 
-              fontsize=14, framealpha=0.9, loc='lower center',
-              bbox_to_anchor=(0.5, 0.02), # Position at the bottom of the figure
-              ncol=2) # Put all items in one row
-              
-    # Add overall title highlighting the comparison
-    fig.suptitle('AI-Fuzzing vs Traditional Testing: Scenario-wise Comparison', 
-                fontsize=20, fontweight='bold', y=0.98)
-
-    # Adjusted padding to accommodate the common legend at the bottom
-    plt.tight_layout(rect=[0, 0.08, 1, 0.95]) # Add space at bottom for legend and top for title
-
-    output_path = os.path.join(output_dir, 'fig_5_scenario_comparison.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_5_scenario_comparison.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    print(f"-> Figure 5 saved to {output_path}")
-
-def create_fig6_network_topology(output_dir):
-    """Figure 6: Network topology visualization for paper context."""
-    print("Generating Figure 6: Network Topology...")
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Left: Hexagonal cell layout
-    def generate_hexagonal_layout(num_cells, distance):
-        coords = [(0.0, 0.0)]
-        if num_cells == 1:
-            return np.array(coords)
-            
-        axial_directions = [(1, -1), (1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1)]
-        axial_coords = [(0, 0)]
-        seen_coords = set([(0, 0)])
-        ring = 1
-        
-        while len(axial_coords) < num_cells:
-            current_axial = (ring, -ring)
-            for dir_idx in range(6):
-                for step in range(ring):
-                    if len(axial_coords) >= num_cells:
-                        break
-                    if current_axial not in seen_coords:
-                        axial_coords.append(current_axial)
-                        seen_coords.add(current_axial)
-                    current_axial = (current_axial[0] + axial_directions[(dir_idx + 1) % 6][0],
-                                   current_axial[1] + axial_directions[(dir_idx + 1) % 6][1])
-                if len(axial_coords) >= num_cells:
-                    break
-            ring += 1
-        
-        cartesian_coords = []
-        for q, r in axial_coords:
-            x = distance * (3./2. * q)
-            y = distance * (np.sqrt(3)/2. * q + np.sqrt(3) * r)
-            cartesian_coords.append((x, y))
-        return np.array(cartesian_coords[:num_cells])
-    
-    # Generate cell positions
-    cell_positions = generate_hexagonal_layout(7, 100)
-    
-    # Plot cells
-    for i, (x, y) in enumerate(cell_positions):
-        circle = plt.Circle((x, y), 50, fill=False, edgecolor='blue', linewidth=2)
-        ax1.add_patch(circle)
-        ax1.text(x, y, f'Cell {i}', ha='center', va='center', fontweight='bold')
-    
-    # Add sample UE positions
-    np.random.seed(42)
-    ue_positions = np.random.uniform(-150, 150, (15, 2))
-    ax1.scatter(ue_positions[:, 0], ue_positions[:, 1], c='red', s=50, 
-               marker='s', label='User Equipment (UE)', alpha=0.8)
-    
-    ax1.set_xlim(-200, 200)
-    ax1.set_ylim(-200, 200)
-    ax1.set_aspect('equal')
-    ax1.set_title('5G Network Topology', fontsize=14)
-    ax1.set_xlabel('Distance (m)', fontsize=12)
-    ax1.set_ylabel('Distance (m)', fontsize=12)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Right: Fuzzing process illustration
-    ax2.text(0.5, 0.9, 'AI-Fuzzer Process', ha='center', va='center', 
-             fontsize=16, fontweight='bold', transform=ax2.transAxes)
-    
-    # Draw process flow
-    boxes = [
-        ('Population\nInitialization', 0.5, 0.8),
-        ('NSGA-II\nEvolution', 0.5, 0.65),
-        ('Multi-Objective\nEvaluation', 0.5, 0.5),
-        ('Vulnerability\nDetection', 0.5, 0.35),
-        ('Pareto Front\nSelection', 0.5, 0.2)
-    ]
-    
-    for i, (text, x, y) in enumerate(boxes):
-        rect = Rectangle((x-0.15, y-0.05), 0.3, 0.08, 
-                        facecolor='lightblue', edgecolor='black', 
-                        transform=ax2.transAxes)
-        ax2.add_patch(rect)
-        ax2.text(x, y, text, ha='center', va='center', 
-                fontsize=10, fontweight='bold', transform=ax2.transAxes)
-        
-        if i < len(boxes) - 1:
-            ax2.arrow(x, y-0.06, 0, -0.04, head_width=0.02, head_length=0.02, 
-                     fc='black', ec='black', transform=ax2.transAxes)
-    
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
-    ax2.axis('off')
-    
-    plt.suptitle('Network Environment and AI-Fuzzing Methodology', fontsize=16, y=0.98)
+    # Adjust layout to prevent text from overlapping borders
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.45)  # Maximum bottom margin (45% of figure for spacing)
     
-    output_path = os.path.join(output_dir, 'fig_6_network_topology.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(output_dir, 'fig_6_network_topology.png'), dpi=300, bbox_inches='tight')
+    output_path = os.path.join(output_dir, 'plot_1_vulnerability_discovery.pdf')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, facecolor='white', 
+                pad_inches=1.2)  # Maximum padding around the entire figure
+    plt.savefig(os.path.join(output_dir, 'plot_1_vulnerability_discovery.png'), 
+                dpi=300, bbox_inches='tight', facecolor='white', pad_inches=1.2)
     plt.close()
     
-    print(f"-> Figure 6 saved to {output_path}")
+    print(f"-> Plot 1 saved to {output_path}")
+    print(f"   Traditional Testing: {means[0]:.1f} ± {cis[0]:.1f} vulnerabilities/run")
+    print(f"   AI Fuzzing: {means[1]:.1f} ± {cis[1]:.1f} vulnerabilities/run")
+    print(f"   Improvement: {improvement:.1f}%")
+    print(f"   Effect size (Cohen's d): {cohens_d:.2f}")
+    print(f"   P-value: {p_value:.6f}")
 
-def generate_summary_table(df, output_dir):
-    """Generate a summary table for the paper."""
-    print("Generating Summary Table...")
+def create_plot2_convergence_analysis(df, output_dir):
+    """
+    Plot 2: Convergence Analysis
+    Enhanced line plot with confidence bands and scatter points
+    """
+    print("Generating Plot 2: Convergence Analysis...")
     
-    fuzzing_df = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
+    # Group by iteration to show progression
+    ai_data = df[df['fuzzer_type'] == 'AI-Fuzzing'].groupby('iteration').agg({
+        'vulnerability_count': ['mean', 'std', 'count']
+    }).reset_index()
     
-    summary = fuzzing_df.groupby('fuzzer_type').agg({
-        'is_critical_failure': ['sum', 'mean'],
-        'vulnerability_count': ['sum', 'mean'],
-        'handover_rate': 'mean',
-        'throughput_5th_percentile_mbps': 'mean',
-        'jain_fairness_index': 'mean'
-    }).round(3)
+    traditional_data = df[df['fuzzer_type'] == 'Traditional-Testing'].groupby('iteration').agg({
+        'vulnerability_count': ['mean', 'std', 'count']
+    }).reset_index()
     
     # Flatten column names
-    summary.columns = ['Total Critical', 'Avg Critical', 'Total Vulns', 'Avg Vulns', 
-                      'Avg Handover Rate', 'Avg 5th Percentile Throughput', 'Avg Fairness']
+    ai_data.columns = ['iteration', 'mean_vulns', 'std_vulns', 'n_samples']
+    traditional_data.columns = ['iteration', 'mean_vulns', 'std_vulns', 'n_samples']
     
-    # Save as CSV
-    summary_path = os.path.join(output_dir, 'summary_table.csv')
-    summary.to_csv(summary_path)
+    # Calculate confidence intervals
+    ai_data['se'] = ai_data['std_vulns'] / np.sqrt(ai_data['n_samples'])
+    ai_data['ci_lower'] = ai_data['mean_vulns'] - 1.96 * ai_data['se']
+    ai_data['ci_upper'] = ai_data['mean_vulns'] + 1.96 * ai_data['se']
+    ai_data['best_fitness'] = ai_data['mean_vulns'].cummax()
     
-    print(f"-> Summary table saved to {summary_path}")
-    print("\nSUMMARY TABLE:")
-    print(summary)
+    traditional_data['se'] = traditional_data['std_vulns'] / np.sqrt(traditional_data['n_samples'])
+    traditional_data['ci_lower'] = traditional_data['mean_vulns'] - 1.96 * traditional_data['se']
+    traditional_data['ci_upper'] = traditional_data['mean_vulns'] + 1.96 * traditional_data['se']
+    traditional_data['best_fitness'] = traditional_data['mean_vulns'].cummax()
+    
+    # Get raw data for scatter overlay
+    ai_raw = df[df['fuzzer_type'] == 'AI-Fuzzing'].groupby('iteration')['vulnerability_count'].apply(list)
+    traditional_raw = df[df['fuzzer_type'] == 'Traditional-Testing'].groupby('iteration')['vulnerability_count'].apply(list)
+    
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8), facecolor='white')  # Optimized size for convergence plot
+    
+    # Plot convergence lines with beautiful colors and confidence bands
+    ai_color = '#4ECDC4'  # Teal
+    traditional_color = '#FF6B6B'  # Coral
+    
+    # Main convergence lines with larger markers and thicker lines
+    ax.plot(ai_data['iteration'], ai_data['best_fitness'], 
+            'o-', color=ai_color, linewidth=4, markersize=10, 
+            label='AI Fuzzing', markerfacecolor='white', markeredgewidth=2.5, alpha=0.9)
+    
+    ax.fill_between(ai_data['iteration'], 
+                    ai_data['ci_lower'].cummax(), ai_data['ci_upper'].cummax(),
+                    alpha=0.25, color=ai_color, label='AI 95% CI')
+    
+    ax.plot(traditional_data['iteration'], traditional_data['best_fitness'], 
+            's--', color=traditional_color, linewidth=4, markersize=10, 
+            label='Traditional Testing', markerfacecolor='white', markeredgewidth=2.5, alpha=0.9)
+    
+    ax.fill_between(traditional_data['iteration'], 
+                    traditional_data['ci_lower'].cummax(), traditional_data['ci_upper'].cummax(),
+                    alpha=0.25, color=traditional_color, label='Traditional 95% CI')
+    
+    # Add scatter points for data distribution with better visibility
+    for iteration in ai_data['iteration']:
+        if iteration in ai_raw.index:
+            y_vals = ai_raw.loc[iteration]
+            x_vals = [iteration + np.random.normal(0, 0.08) for _ in y_vals]  # Reduced jitter
+            ax.scatter(x_vals, y_vals, alpha=0.6, color=ai_color, s=35, 
+                      edgecolor='white', linewidth=1, zorder=5)
+    
+    for iteration in traditional_data['iteration']:
+        if iteration in traditional_raw.index:
+            y_vals = traditional_raw.loc[iteration]
+            x_vals = [iteration + np.random.normal(0, 0.08) for _ in y_vals]  # Reduced jitter
+            ax.scatter(x_vals, y_vals, alpha=0.6, color=traditional_color, s=35, 
+                      marker='s', edgecolor='white', linewidth=1, zorder=5)
+    
+    # Enhanced labels with larger fonts - title removed for caption
+    ax.set_xlabel('Generation Number', fontsize=24, fontweight='bold')
+    ax.set_ylabel('Best Fitness Score\n(Cumulative Max Vulnerabilities)', fontsize=24, fontweight='bold')
+    ax.tick_params(axis='x', labelsize=20)
+    ax.tick_params(axis='y', labelsize=20)
+    ax.legend(fontsize=18, loc='upper left', framealpha=0.95, shadow=True)  # Moved to top corner
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+    
+    # Calculate convergence metrics
+    final_ai = ai_data['best_fitness'].iloc[-1]
+    final_traditional = traditional_data['best_fitness'].iloc[-1]
+    
+    # Find convergence point (where 90% of final value is reached)
+    ai_convergence_idx = np.where(ai_data['best_fitness'] >= 0.9 * final_ai)[0]
+    traditional_convergence_idx = np.where(traditional_data['best_fitness'] >= 0.9 * final_traditional)[0]
+    
+    if len(ai_convergence_idx) > 0 and len(traditional_convergence_idx) > 0:
+        ai_convergence = ai_data['iteration'].iloc[ai_convergence_idx[0]]
+        traditional_convergence = traditional_data['iteration'].iloc[traditional_convergence_idx[0]]
+        speedup = ((traditional_convergence - ai_convergence) / traditional_convergence) * 100
+    else:
+        speedup = 0
+        ai_convergence = ai_data['iteration'].iloc[-1]
+        traditional_convergence = traditional_data['iteration'].iloc[-1]
+    
+    plt.tight_layout()
+    plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.15)  # Optimized margins
+    
+    output_path = os.path.join(output_dir, 'plot_2_convergence_analysis.pdf')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, facecolor='white', 
+                pad_inches=0.3)  # Clean padding
+    plt.savefig(os.path.join(output_dir, 'plot_2_convergence_analysis.png'), 
+                dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.3)
+    plt.close()
+    
+    print(f"-> Plot 2 saved to {output_path}")
+    print(f"   AI convergence at generation: {ai_convergence}")
+    print(f"   Traditional convergence at generation: {traditional_convergence}")
+    print(f"   Speedup: {speedup:.1f}%")
+    print(f"   Final performance ratio: {final_ai/final_traditional:.2f}×")
+
+def create_plot3_vulnerability_severity_distribution(df, output_dir):
+    """
+    Plot 3: Vulnerability Severity Distribution
+    Enhanced stacked bar chart with diversity analysis and normalized percentages
+    """
+    print("Generating Plot 3: Vulnerability Severity Distribution...")
+    
+    comparison_data = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
+    
+    # Count vulnerabilities by severity and fuzzer type
+    severity_counts = comparison_data.groupby(['fuzzer_type', 'severity']).size().unstack(fill_value=0)
+    
+    # Ensure we have all severity levels
+    severity_levels = ['Critical', 'High', 'Medium', 'Low']
+    for level in severity_levels:
+        if level not in severity_counts.columns:
+            severity_counts[level] = 0
+    
+    severity_counts = severity_counts[severity_levels]  # Reorder columns
+    
+    # Calculate normalized percentages
+    severity_percentages = severity_counts.div(severity_counts.sum(axis=1), axis=0) * 100
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8), facecolor='white')
+    
+    # Left plot: Absolute counts
+    # Beautiful gradient colors for severity levels
+    colors = ['#E74C3C', '#F39C12', '#F1C40F', '#2ECC71']  # Red to Green gradient
+    # Critical=Red, High=Orange, Medium=Yellow, Low=Green
+    
+    severity_counts.plot(kind='bar', stacked=True, ax=ax1, color=colors, 
+                        alpha=0.8, edgecolor='black', linewidth=1, width=0.5, legend=False)
+    
+    ax1.set_title('Absolute Vulnerability Counts by Severity', fontsize=20, fontweight='bold', pad=25)
+    ax1.set_xlabel('Testing Approach', fontsize=18, fontweight='bold')
+    ax1.set_ylabel('Number of Vulnerabilities', fontsize=18, fontweight='bold')
+    ax1.tick_params(axis='x', rotation=0, labelsize=16)
+    ax1.tick_params(axis='y', labelsize=16)
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.set_axisbelow(True)
+    
+    # Set y-axis limits to provide space for total labels
+    max_total = severity_counts.sum(axis=1).max()
+    ax1.set_ylim(0, max_total * 1.2)
+    
+    # Add total counts on top of bars with more spacing
+    for i, (idx, row) in enumerate(severity_counts.iterrows()):
+        total = row.sum()
+        ax1.text(i, total + 25, f'Total: {int(total)}', 
+                ha='center', va='bottom', fontweight='bold', fontsize=16)
+    
+    # Right plot: Normalized percentages
+    severity_percentages.plot(kind='bar', stacked=True, ax=ax2, color=colors, 
+                             alpha=0.8, edgecolor='black', linewidth=1, width=0.5, legend=False)
+    
+    ax2.set_title('Normalized Severity Distribution (%)', fontsize=20, fontweight='bold', pad=25)
+    ax2.set_xlabel('Testing Approach', fontsize=18, fontweight='bold')
+    ax2.set_ylabel('Percentage of Vulnerabilities', fontsize=18, fontweight='bold')
+    ax2.tick_params(axis='x', rotation=0, labelsize=16)
+    ax2.tick_params(axis='y', labelsize=16)
+    ax2.set_ylim(0, 100)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_axisbelow(True)
+    
+    # Add subplot labels (a) and (b) with small gap from x-axis labels
+    ax1.text(0.5, -0.18, '(a)', transform=ax1.transAxes, fontsize=18, fontweight='bold',
+             horizontalalignment='center', verticalalignment='top')
+    ax2.text(0.5, -0.18, '(b)', transform=ax2.transAxes, fontsize=18, fontweight='bold',
+             horizontalalignment='center', verticalalignment='top')
+    
+    # Add percentage labels on the normalized chart
+    for i, (idx, row) in enumerate(severity_percentages.iterrows()):
+        cumsum = 0
+        for j, (severity, percentage) in enumerate(row.items()):
+            if percentage > 5:  # Only show labels for segments > 5%
+                ax2.text(i, cumsum + percentage/2, f'{percentage:.1f}%', 
+                        ha='center', va='center', fontweight='bold', fontsize=14,
+                        color='white' if j < 2 else 'black')  # White text on dark, black on light
+            cumsum += percentage
+    
+    # Calculate diversity indices
+    def shannon_diversity(counts):
+        total = counts.sum()
+        if total == 0:
+            return 0
+        proportions = counts / total
+        return -np.sum(proportions * np.log(proportions + 1e-10))
+    
+    def simpson_diversity(counts):
+        total = counts.sum()
+        if total == 0:
+            return 0
+        proportions = counts / total
+        return 1 - np.sum(proportions**2)
+    
+    ai_shannon = shannon_diversity(severity_counts.loc['AI-Fuzzing'])
+    traditional_shannon = shannon_diversity(severity_counts.loc['Traditional-Testing'])
+    ai_simpson = simpson_diversity(severity_counts.loc['AI-Fuzzing'])
+    traditional_simpson = simpson_diversity(severity_counts.loc['Traditional-Testing'])
+    
+    # Add sample sizes above the legend with 0.17 gap
+    ai_samples = len(comparison_data[comparison_data['fuzzer_type'] == 'AI-Fuzzing'])
+    traditional_samples = len(comparison_data[comparison_data['fuzzer_type'] == 'Traditional-Testing'])
+    
+    fig.text(0.5, 0.19, f'Sample sizes: AI n={ai_samples}, Traditional n={traditional_samples}', 
+            fontsize=14, horizontalalignment='center', verticalalignment='center',
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+    
+    # Create unified legend at the bottom with 0.17 gap from sample sizes
+    legend_elements = [plt.Rectangle((0,0),1,1, facecolor=colors[i], 
+                                   edgecolor='black', 
+                                   label=severity_levels[i]) for i in range(len(severity_levels))]
+    fig.legend(handles=legend_elements, title='Severity Level', 
+              fontsize=16, title_fontsize=14, loc='lower center', 
+              bbox_to_anchor=(0.5, 0.02), ncol=4, framealpha=0.9)
+    
+    plt.tight_layout(rect=[0, 0.24, 1, 0.95])
+    
+    output_path = os.path.join(output_dir, 'plot_3_severity_distribution.pdf')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, facecolor='white')
+    plt.savefig(os.path.join(output_dir, 'plot_3_severity_distribution.png'), 
+                dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"-> Plot 3 saved to {output_path}")
+    print(f"   AI Fuzzing Shannon diversity: {ai_shannon:.3f}")
+    print(f"   Traditional Shannon diversity: {traditional_shannon:.3f}")
+    print(f"   AI Fuzzing Simpson diversity: {ai_simpson:.3f}")
+    print(f"   Traditional Simpson diversity: {traditional_simpson:.3f}")
+
+def create_plot4_performance_across_scenarios(df, output_dir):
+    """
+    Plot 4: Performance Across Scenarios
+    Enhanced grouped bar chart with error bars and statistical significance
+    """
+    print("Generating Plot 4: Performance Across Scenarios...")
+    
+    comparison_data = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
+    
+    # Focus on 3 main scenarios for clarity
+    main_scenarios = ['Stable Mobility', 'Load Imbalance', 'Congestion Crisis']
+    scenario_data = comparison_data[comparison_data['scenario'].isin(main_scenarios)]
+    
+    # Calculate detailed statistics per scenario
+    scenario_stats = []
+    p_values = []
+    
+    for scenario in main_scenarios:
+        scenario_subset = scenario_data[scenario_data['scenario'] == scenario]
+        
+        stats_row = {}
+        for fuzzer_type in ['Traditional-Testing', 'AI-Fuzzing']:
+            fuzzer_subset = scenario_subset[scenario_subset['fuzzer_type'] == fuzzer_type]
+            
+            # Group by run (iteration) for proper statistics
+            run_vulns = fuzzer_subset.groupby('iteration')['vulnerability_count'].sum()
+            
+            mean_vulns = run_vulns.mean()
+            std_vulns = run_vulns.std()
+            n_runs = len(run_vulns)
+            se_vulns = std_vulns / np.sqrt(n_runs) if n_runs > 0 else 0
+            ci_95 = 1.96 * se_vulns
+            
+            stats_row[fuzzer_type] = {
+                'mean': mean_vulns,
+                'std': std_vulns,
+                'se': se_vulns,
+                'ci': ci_95,
+                'n': n_runs,
+                'raw_data': run_vulns.values if n_runs > 0 else [0]
+            }
+        
+        # Statistical test for this scenario
+        if (stats_row['Traditional-Testing']['n'] > 0 and 
+            stats_row['AI-Fuzzing']['n'] > 0):
+            u_stat, p_val = mannwhitneyu(
+                stats_row['AI-Fuzzing']['raw_data'],
+                stats_row['Traditional-Testing']['raw_data'],
+                alternative='greater'
+            )
+        else:
+            p_val = 1.0
+            
+        p_values.append(p_val)
+        scenario_stats.append(stats_row)
+    
+    # Create enhanced plot
+    fig, ax = plt.subplots(1, 1, figsize=(14, 12), facecolor='white')  # Further increased height for maximum space
+    
+    x = np.arange(len(main_scenarios))
+    width = 0.35
+    
+    # Grayscale-friendly colors with patterns
+    colors = ['#666666', '#333333']  # Gray tones
+    hatches = ['///', '']  # Patterns for distinction
+    
+    traditional_means = [stats[list(stats.keys())[0]]['mean'] for stats in scenario_stats]
+    traditional_cis = [stats[list(stats.keys())[0]]['ci'] for stats in scenario_stats]
+    traditional_ns = [stats[list(stats.keys())[0]]['n'] for stats in scenario_stats]
+    
+    ai_means = [stats[list(stats.keys())[1]]['mean'] for stats in scenario_stats]
+    ai_cis = [stats[list(stats.keys())[1]]['ci'] for stats in scenario_stats]
+    ai_ns = [stats[list(stats.keys())[1]]['n'] for stats in scenario_stats]
+    
+    # Beautiful colors for scenario comparison
+    colors = ['#FF6B6B', '#4ECDC4']  # Coral Red for Traditional, Teal for AI
+    edge_colors = ['#E74C3C', '#16A085']  # Darker edges
+    
+    bars1 = ax.bar(x - width/2, traditional_means, width, 
+                   label='Traditional Testing', color=colors[0], alpha=0.8, 
+                   yerr=traditional_cis, capsize=5,
+                   edgecolor=edge_colors[0], linewidth=1.5)
+    
+    bars2 = ax.bar(x + width/2, ai_means, width, 
+                   label='AI Fuzzing', color=colors[1], alpha=0.8, 
+                   yerr=ai_cis, capsize=5,
+                   edgecolor=edge_colors[1], linewidth=1.5)
+    
+    # Add mean ± CI labels on bars with larger fonts
+    for i, (bar, mean_val, ci_val, n_val) in enumerate(zip(bars1, traditional_means, traditional_cis, traditional_ns)):
+        if mean_val > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + ci_val + 0.1,
+                    f'{mean_val:.1f}±{ci_val:.1f}\n(n={n_val})', 
+                    ha='center', va='bottom', fontweight='bold', fontsize=16)
+
+    for i, (bar, mean_val, ci_val, n_val) in enumerate(zip(bars2, ai_means, ai_cis, ai_ns)):
+        if mean_val > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + ci_val + 0.1,
+                    f'{mean_val:.1f}±{ci_val:.1f}\n(n={n_val})', 
+                    ha='center', va='bottom', fontweight='bold', fontsize=16)
+
+    # Enhanced styling with larger fonts for better readability - title removed for caption
+    ax.set_ylabel('Mean Vulnerabilities per Run', fontsize=20, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels([s.replace(' ', '\n') for s in main_scenarios], fontsize=18, fontweight='medium')
+    ax.tick_params(axis='y', labelsize=18)
+    ax.legend(fontsize=16, loc='upper left', framealpha=0.9)
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_axisbelow(True)
+    
+    # Calculate improvements and effect sizes for each scenario
+    improvements = []
+    effect_sizes = []
+    
+    for i, stats in enumerate(scenario_stats):
+        traditional_stats = stats['Traditional-Testing']
+        ai_stats = stats['AI-Fuzzing']
+        
+        if traditional_stats['mean'] > 0:
+            improvement = ((ai_stats['mean'] - traditional_stats['mean']) / 
+                          traditional_stats['mean']) * 100
+            improvements.append(improvement)
+            
+            # Cohen's d
+            pooled_std = np.sqrt((traditional_stats['std']**2 + ai_stats['std']**2) / 2)
+            cohens_d = (ai_stats['mean'] - traditional_stats['mean']) / pooled_std if pooled_std > 0 else 0
+            effect_sizes.append(cohens_d)
+        else:
+            improvements.append(0)
+            effect_sizes.append(0)
+    
+    avg_improvement = np.mean([imp for imp in improvements if imp != 0])
+    avg_effect_size = np.mean([es for es in effect_sizes if es != 0])
+    
+    # Add comprehensive analysis box
+    analysis_text = f'''Cross-Scenario Analysis:
+Average Improvement: ↗ +{avg_improvement:.1f}%
+Average Effect Size: {avg_effect_size:.2f}
+Significant scenarios: {sum(1 for p in p_values if p < 0.05)}/{len(p_values)}
+Robustness Index: {(avg_improvement/100) * (avg_effect_size/2):.2f}'''
+    
+    ax.text(0.98, 0.98, analysis_text, transform=ax.transAxes, 
+            fontsize=14, fontweight='normal',
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8),
+            verticalalignment='top', horizontalalignment='right', family='monospace')
+    
+    # Add individual scenario improvements as arrows
+    for i, improvement in enumerate(improvements):
+        if improvement > 0:
+            ax.annotate(f'+{improvement:.0f}%', xy=(i, max(ai_means[i] + ai_cis[i], traditional_means[i] + traditional_cis[i]) * 0.8),
+                       xytext=(i, max(ai_means[i] + ai_cis[i], traditional_means[i] + traditional_cis[i]) * 0.9),
+                       ha='center', fontsize=14, fontweight='bold', color='green',
+                       arrowprops=dict(arrowstyle='->', color='green', lw=1))
+    
+    # Adjust layout to prevent labels from crossing borders
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.7)  # Maximum space at top for bar labels (30% reserved)
+    
+    output_path = os.path.join(output_dir, 'plot_4_scenario_performance.pdf')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, facecolor='white', 
+                pad_inches=1.0)  # Maximum padding around the figure
+    plt.savefig(os.path.join(output_dir, 'plot_4_scenario_performance.png'), 
+                dpi=300, bbox_inches='tight', facecolor='white', pad_inches=1.0)
+    plt.close()
+    
+    print(f"-> Plot 4 saved to {output_path}")
+    print(f"   Average improvement across scenarios: {avg_improvement:.1f}%")
+    print(f"   Average effect size: {avg_effect_size:.2f}")
+    print(f"   Significant scenarios: {sum(1 for p in p_values if p < 0.05)}/{len(p_values)}")
+    print(f"   P-values: {[f'{p:.4f}' for p in p_values]}")
 
 def main():
-    """Main function to generate all publication plots."""
-    print("=== AI-Fuzzing 5G Publication Plot Generator ===")
+    """Main function to generate all essential publication plots."""
+    print("=== AI-Fuzzing Essential Plots Generator ===")
     
     # Create output directory
     if not os.path.exists(OUTPUT_DIR):
@@ -556,23 +632,35 @@ def main():
     df = load_and_prepare_data(CSV_FILENAME)
     
     if df is not None:
-        create_fig1_main_comparison(df, OUTPUT_DIR)
-        create_fig2_qoe_performance(df, OUTPUT_DIR)
-        create_fig3_vulnerability_heatmap(df, OUTPUT_DIR)
-        create_fig4_statistical_analysis(df, OUTPUT_DIR)
-        create_fig5_scenario_comparison(df, OUTPUT_DIR)
-        create_fig6_network_topology(OUTPUT_DIR)
-        generate_summary_table(df, OUTPUT_DIR)
+        print(f"\nDataset overview:")
+        print(f"Total rows: {len(df)}")
+        print(f"Fuzzer types: {df['fuzzer_type'].unique()}")
+        print(f"Scenarios: {df['scenario'].unique()}")
+        print(f"Total vulnerabilities: {df['vulnerability_count'].sum()}")
         
-        print(f"\n=== ALL PLOTS GENERATED SUCCESSFULLY ===")
+        # Generate the 4 essential plots
+        create_plot1_vulnerability_discovery_comparison(df, OUTPUT_DIR)
+        create_plot2_convergence_analysis(df, OUTPUT_DIR)
+        create_plot3_vulnerability_severity_distribution(df, OUTPUT_DIR)
+        create_plot4_performance_across_scenarios(df, OUTPUT_DIR)
+        
+        print(f"\n=== ALL ESSENTIAL PLOTS GENERATED SUCCESSFULLY ===")
         print(f"Check the '{OUTPUT_DIR}' directory for:")
-        print("- Figure 1: Main effectiveness comparison")
-        print("- Figure 2: QoE performance analysis") 
-        print("- Figure 3: Vulnerability breakdown heatmap")
-        print("- Figure 4: Statistical significance analysis")
-        print("- Figure 5: Scenario comparison")
-        print("- Figure 6: Network topology")
-        print("- Summary table (CSV format)")
+        print("- Plot 1: Vulnerability Discovery Comparison (main effectiveness)")
+        print("- Plot 2: Convergence Analysis (scientific validation)")
+        print("- Plot 3: Vulnerability Severity Distribution (quality analysis)")
+        print("- Plot 4: Performance Across Scenarios (robustness validation)")
+        
+        # Generate summary statistics
+        ai_total = df[df['fuzzer_type'] == 'AI-Fuzzing']['vulnerability_count'].sum()
+        traditional_total = df[df['fuzzer_type'] == 'Traditional-Testing']['vulnerability_count'].sum()
+        improvement = ((ai_total - traditional_total) / traditional_total) * 100
+        
+        print(f"\n=== KEY STATISTICS ===")
+        print(f"AI-Fuzzing total vulnerabilities: {ai_total}")
+        print(f"Traditional-Testing total vulnerabilities: {traditional_total}")
+        print(f"Overall improvement: {improvement:.1f}%")
+        
     else:
         print("Could not proceed due to data loading error.")
 
