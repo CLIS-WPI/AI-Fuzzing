@@ -114,8 +114,8 @@ TX_POWER_DBM = 30
 NOISE_POWER_DBM_PER_HZ = -174
 # The simulation iterations are kept low for a quick demonstration.
 # For a real paper submission, this should be increased to at least 200.
-NUM_INDEPENDENT_RUNS = 5    # Reduced for faster execution
-SIMULATION_ITERATIONS = 10   # Reduced for faster execution
+NUM_INDEPENDENT_RUNS = 10    # Reduced for faster execution
+SIMULATION_ITERATIONS = 15   # Reduced for faster execution
 FUZZER_GENERATIONS = 25  # Reduced for faster execution
 FUZZER_POPULATION = 40  # Reduced for faster execution
 
