@@ -1,8 +1,6 @@
 # Ignore datasets
 data/
-*.csv
 *.json
-
 # Ignore models
 *.deb
 *.run
