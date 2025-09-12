@@ -19,27 +19,29 @@ warnings.filterwarnings('ignore')
 CSV_FILENAME = "fuzzing_results_v28_strategic_fuzzing.csv"
 OUTPUT_DIR = "plots_essential_paper"
 
-# Set professional plotting style for journal publication
+# Set clean, professional plotting style with LARGER fonts
 plt.rcParams.update({
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 11,
-    'ytick.labelsize': 11,
-    'legend.fontsize': 11,
-    'figure.titlesize': 16,
-    'font.family': 'serif',
-    'font.serif': ['Times New Roman', 'DejaVu Serif'],
-    'text.usetex': False,
-    'font.weight': 'normal',
-    'axes.titleweight': 'bold',
-    'axes.labelweight': 'normal',
+    'font.size': 16,
+    'axes.titlesize': 18,
+    'axes.labelsize': 18,
+    'xtick.labelsize': 22,  # Much larger for method names
+    'ytick.labelsize': 16,
+    'legend.fontsize': 15,
+    'figure.titlesize': 20,
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Arial', 'DejaVu Sans', 'Liberation Sans'],
+    'axes.labelweight': 'bold',
     'axes.grid': True,
     'grid.alpha': 0.3,
+    'grid.linewidth': 0.5,
     'figure.facecolor': 'white',
     'axes.facecolor': 'white',
     'axes.edgecolor': 'black',
-    'axes.linewidth': 1.0
+    'axes.linewidth': 1.0,
+    'figure.dpi': 100,
+    'savefig.dpi': 300,
+    'savefig.bbox': 'tight',
+    'savefig.facecolor': 'white'
 })
 
 def load_and_prepare_data(csv_file):
@@ -79,10 +81,10 @@ def load_and_prepare_data(csv_file):
 
 def create_plot1_vulnerability_discovery_comparison(df, output_dir):
     """
-    Plot 1: Vulnerability Discovery Comparison
-    Enhanced bar chart with confidence intervals, effect size, and statistical analysis
+    Plot 1: Clean and Professional Vulnerability Discovery Comparison
+    Simple, readable bar chart without overlapping elements
     """
-    print("Generating Plot 1: Vulnerability Discovery Comparison...")
+    print("Generating Plot 1: Clean Vulnerability Discovery Comparison...")
     
     # Filter data for the two main approaches
     comparison_data = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
@@ -128,72 +130,93 @@ def create_plot1_vulnerability_discovery_comparison(df, output_dir):
                         (len(traditional_runs) + len(ai_runs) - 2))
     cohens_d = (np.mean(ai_runs) - np.mean(traditional_runs)) / pooled_std
     
-    # Create enhanced plot
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8), facecolor='white')
+    # Create clean, simple plot with EXTREME MAXIMUM spacing
+    fig, ax = plt.subplots(1, 1, figsize=(16, 14), facecolor='white')
     
     fuzzer_types = [data['fuzzer_type'] for data in stats_data]
+    # Change display names for cleaner appearance
+    display_names = []
+    for fuzzer_type in fuzzer_types:
+        if fuzzer_type == 'Traditional-Testing':
+            display_names.append('Traditional Testing')
+        else:
+            display_names.append(fuzzer_type)
+    
     means = [data['mean_vulnerabilities'] for data in stats_data]
     cis = [data['ci_95'] for data in stats_data]
     n_runs = [data['n_runs'] for data in stats_data]
     
-    # Beautiful vibrant colors for publication
-    colors = ['#FF6B6B', '#4ECDC4']  # Coral Red for Traditional, Teal for AI
-    edge_colors = ['#E74C3C', '#16A085']  # Darker edges for contrast
+    # Simple, professional colors
+    colors = ['#4472C4', '#E15759']  # Blue for Traditional, Red for AI
     
-    # Create bars with error bars
-    bars = ax.bar(fuzzer_types, means, color=colors, alpha=0.8, 
-                  yerr=cis, capsize=8, 
-                  edgecolor=edge_colors, linewidth=2)
+    # Create simple bars with clean error bars using display names
+    bars = ax.bar(display_names, means, color=colors, alpha=0.8, 
+                  yerr=cis, capsize=8, width=0.5,
+                  edgecolor='black', linewidth=1.5,
+                  error_kw={'elinewidth': 2, 'capthick': 2})
     
-    # Set larger font sizes for tick labels
-    ax.tick_params(axis='x', labelsize=24)
-    ax.tick_params(axis='y', labelsize=24)
+    # Clean axis labels with LARGER font sizes
+    ax.set_ylabel('Vulnerabilities per Run', fontsize=20, fontweight='bold')
+    ax.tick_params(axis='x', labelsize=24, pad=15)  # Much larger x-axis labels
+    ax.tick_params(axis='y', labelsize=18)
     
-    # Add mean ± CI labels on bars
-    for i, (bar, mean_val, ci_val) in enumerate(zip(bars, means, cis)):
+    # Calculate dimensions for EXTREME spacing
+    max_bar_height = max(means)
+    max_error_height = max([m + c for m, c in zip(means, cis)])
+    
+    # Add ONLY value labels on bars - positioned EXTREMELY high above error bars
+    for i, (bar, mean_val) in enumerate(zip(bars, means)):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + ci_val + 0.2,
-                f'{mean_val:.1f} ± {ci_val:.1f}', 
-                ha='center', va='bottom', fontweight='bold', fontsize=26)
-    
-    # Statistical significance annotation with detailed info
-    max_height = max([m + c for m, c in zip(means, cis)])
-    significance = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "ns"
-    
-    # Add significance bracket
-    y_bracket = max_height * 1.15
-    ax.plot([0, 1], [y_bracket, y_bracket], 'k-', linewidth=1)
-    ax.plot([0, 0], [y_bracket-0.3, y_bracket], 'k-', linewidth=1)
-    ax.plot([1, 1], [y_bracket-0.3, y_bracket], 'k-', linewidth=1)
-    
-    ax.text(0.5, y_bracket + 0.5, f'p = {p_value:.4f} {significance}', 
-            ha='center', va='bottom', fontsize=28, fontweight='bold')
+        ci_val = cis[i]
+        # Position label EXTREMELY high above error bar
+        ax.text(bar.get_x() + bar.get_width()/2., height + ci_val + 3.0,
+                f'{mean_val:.1f}', 
+                ha='center', va='bottom', fontweight='bold', fontsize=22)
     
     # Calculate improvement percentage
     improvement = ((means[1] - means[0]) / means[0]) * 100
     
-    # Remove title for cleaner appearance - title info moved to caption
-    ax.set_ylabel('Mean Vulnerabilities per Run', fontsize=30, fontweight='bold')
-    ax.set_ylim(-6.0, max_height * 1.3)  # Maximum extended lower limit for huge gap
+    # Position significance elements with ENORMOUS gaps
+    y_start_annotations = max_error_height + 8.0  # ENORMOUS gap from error bars
     
-    # Add grid for better readability
-    ax.grid(True, alpha=0.3, axis='y')
+    # Significance bracket positioned extremely high
+    y_bracket = y_start_annotations
+    ax.plot([0, 1], [y_bracket, y_bracket], 'k-', linewidth=2)
+    ax.plot([0, 0], [y_bracket-0.8, y_bracket], 'k-', linewidth=2)
+    ax.plot([1, 1], [y_bracket-0.8, y_bracket], 'k-', linewidth=2)
+    
+    # P-value text positioned with gap above bracket
+    p_text = f'p < 0.001' if p_value < 0.001 else f'p = {p_value:.3f}'
+    ax.text(0.5, y_bracket + 3.5, f'{p_text}', 
+            ha='center', va='bottom', fontsize=20, fontweight='bold')
+    
+    # Improvement text positioned with MUCH LARGER gap above p-value
+    ax.text(0.5, y_bracket + 8.5, f'{improvement:.1f}% improvement', 
+            ha='center', va='bottom', fontsize=24, color='darkgreen', fontweight='bold')
+    
+    # Set y-limits with extra space for larger gap between texts
+    ax.set_ylim(0, max_error_height + 22.0)  # Even more space at top
+    
+    # Simple grid
+    ax.grid(True, alpha=0.3, axis='y', linestyle='-', linewidth=0.5)
     ax.set_axisbelow(True)
     
-    # Add sample size annotations under bars
-    for i, (bar, n) in enumerate(zip(bars, n_runs)):
-        ax.text(bar.get_x() + bar.get_width()/2., -3.5,
-                f'n = {n}', ha='center', va='top', fontsize=24, fontweight='bold')
+    # Clean spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1)
+    ax.spines['bottom'].set_linewidth(1)
     
-    # Adjust layout to prevent text from overlapping borders
-    plt.tight_layout()
-    plt.subplots_adjust(bottom=0.45)  # Maximum bottom margin (45% of figure for spacing)
+    # Keep improvement text at top, minimal bottom margin
+    plt.tight_layout(pad=2.0)  
+    plt.subplots_adjust(bottom=0.15, top=0.6, left=0.2, right=0.9)  # Minimal bottom space
     
+    # Save with clean settings
     output_path = os.path.join(output_dir, 'plot_1_vulnerability_discovery.pdf')
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, facecolor='white', 
-                pad_inches=1.2)  # Maximum padding around the entire figure
+    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300, 
+                facecolor='white', edgecolor='none')
     plt.savefig(os.path.join(output_dir, 'plot_1_vulnerability_discovery.png'), 
-                dpi=300, bbox_inches='tight', facecolor='white', pad_inches=1.2)
+                dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
     
     print(f"-> Plot 1 saved to {output_path}")
