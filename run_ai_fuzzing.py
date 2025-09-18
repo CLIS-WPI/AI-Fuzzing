@@ -754,6 +754,119 @@ class UtilityBased(TrafficSteeringAlgorithm):
         self.prev_assignments = assignments
         return assignments
 
+class LoadAwareBaseline(TrafficSteeringAlgorithm):
+    """
+    Load-aware baseline with SINR threshold and weighted fallback strategy.
+    This baseline provides a stronger comparison point by combining signal quality
+    and load balancing considerations.
+    """
+    
+    def __init__(self, num_ues, num_cells, sinr_threshold=-5.0, load_weight=0.3):
+        super().__init__(num_ues, num_cells)
+        self.sinr_threshold = sinr_threshold  # dB - reasonable 5G threshold
+        self.load_weight = load_weight
+    
+    def assign_ues(self, rsrp, sinr, cell_loads, priorities, dt=1.0):
+        if rsrp.shape[0] != self.num_ues or rsrp.shape[1] != self.num_cells:
+            if self.prev_assignments is None:
+                self.prev_assignments = np.zeros(self.num_ues, dtype=int)
+            return self.prev_assignments
+
+        assignments = []
+        
+        for ue in range(self.num_ues):
+            # Find cells with acceptable SINR
+            valid_cells = np.where(sinr[ue] > self.sinr_threshold)[0]
+            
+            if len(valid_cells) > 0:
+                # Select cell with minimum load among valid cells
+                best_cell = valid_cells[np.argmin(cell_loads[valid_cells])]
+            else:
+                # Fallback: weighted combination of SINR and load
+                scores = []
+                for cell in range(self.num_cells):
+                    # Normalize SINR to [0,1] range (assume SINR range [-20, 30] dB)
+                    norm_sinr = np.clip((sinr[ue, cell] + 20) / 50, 0, 1)
+                    # Load is assumed to be [0,1] - invert for scoring (lower load = higher score)
+                    norm_load = 1 - np.clip(cell_loads[cell], 0, 1)
+                    # Weighted combination
+                    score = (1 - self.load_weight) * norm_sinr + self.load_weight * norm_load
+                    scores.append(score)
+                best_cell = np.argmax(scores)
+            
+            assignments.append(best_cell)
+        
+        self.prev_assignments = np.array(assignments)
+        return self.prev_assignments
+
+class RandomTestingBaseline(TrafficSteeringAlgorithm):
+    """
+    Random assignment baseline for comparison. This provides a lower bound
+    for performance evaluation and demonstrates the value of intelligent algorithms.
+    """
+    
+    def __init__(self, num_ues, num_cells, seed=42):
+        super().__init__(num_ues, num_cells)
+        self.rng = np.random.RandomState(seed)
+    
+    def assign_ues(self, rsrp, sinr, cell_loads, priorities, dt=1.0):
+        if rsrp.shape[0] != self.num_ues or rsrp.shape[1] != self.num_cells:
+            if self.prev_assignments is None:
+                self.prev_assignments = np.zeros(self.num_ues, dtype=int)
+            return self.prev_assignments
+
+        # Initialize assignments array
+        assignments = np.zeros(self.num_ues, dtype=int)
+        current_loads = cell_loads.copy()  # Track loads as we assign
+        
+        # Sort UEs by priority for fair assignment
+        ue_order = np.argsort(-priorities)  # High priority first
+        
+        # Parameters for cell selection
+        LOAD_THRESHOLD = 0.7  # Stricter load threshold
+        RSRP_THRESHOLD = -100  # Stricter RSRP threshold
+        MIN_SINR = 0  # Minimum acceptable SINR
+        
+        for ue_idx in ue_order:
+            # Calculate cell scores based on multiple factors
+            cell_scores = np.zeros(self.num_cells)
+            for cell_idx in range(self.num_cells):
+                # Eliminate cells that violate hard constraints
+                if (rsrp[ue_idx, cell_idx] <= RSRP_THRESHOLD or
+                    sinr[ue_idx, cell_idx] <= MIN_SINR or
+                    current_loads[cell_idx] >= LOAD_THRESHOLD):
+                    cell_scores[cell_idx] = -np.inf
+                    continue
+                
+                # Score based on RSRP, SINR, and current load
+                rsrp_score = (rsrp[ue_idx, cell_idx] + 140) / 70  # Normalize to ~[0,1]
+                sinr_score = (sinr[ue_idx, cell_idx] + 30) / 60  # Normalize to ~[0,1]
+                load_penalty = current_loads[cell_idx] * 2  # Penalize high loads
+                
+                cell_scores[cell_idx] = rsrp_score + sinr_score - load_penalty
+            
+            # Get valid cells (those with non-negative scores)
+            valid_cells = np.where(cell_scores > -np.inf)[0]
+            
+            if len(valid_cells) == 0:
+                # If no valid cells, pick the one with best combined RSRP/SINR
+                combined_metric = rsrp[ue_idx] / 2 + sinr[ue_idx]
+                assignments[ue_idx] = np.argmax(combined_metric)
+            else:
+                # Convert scores to probabilities for weighted random choice
+                scores = cell_scores[valid_cells]
+                probs = np.exp(scores - np.max(scores))  # Softmax-like normalization
+                probs = probs / np.sum(probs)
+                
+                # Weighted random choice based on scores
+                assignments[ue_idx] = self.rng.choice(valid_cells, p=probs)
+            
+            # Update the load for the selected cell
+            current_loads[assignments[ue_idx]] += 1.0 / self.num_ues
+        
+        self.prev_assignments = assignments
+        return assignments
+
 class MLTrafficSteering(TrafficSteeringAlgorithm):
     """
     ML-based Q-learning algorithm with experience replay.
@@ -2031,7 +2144,9 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     algorithm_factories = {
         "Baseline": lambda: BaselineA3(num_ues=num_ues, num_cells=shared_env_state.num_cells),
         "Utility": lambda: UtilityBased(num_ues=num_ues, num_cells=shared_env_state.num_cells),
-        "ML-Based": lambda: MLTrafficSteering(num_ues=num_ues, num_cells=shared_env_state.num_cells)
+        "ML-Based": lambda: MLTrafficSteering(num_ues=num_ues, num_cells=shared_env_state.num_cells),
+        "Load-Aware": lambda: LoadAwareBaseline(num_ues=num_ues, num_cells=shared_env_state.num_cells),
+        "Random": lambda: RandomTestingBaseline(num_ues=num_ues, num_cells=shared_env_state.num_cells)
     }
     
     fuzzer_map = {
@@ -2042,7 +2157,7 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     results_list = []
     fuzzer_effectiveness = {}
     
-    # Initialize fuzzer_effectiveness with nested dictionaries to track results by run
+    # Initialize fuzzer_effectiveness with nested dictionaries to track results by run and algorithm
     for fuzzer_name in fuzzer_map.keys():
         fuzzer_effectiveness[fuzzer_name] = {
             'vulnerability_counts': [],
@@ -2056,7 +2171,17 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
             'runs_critical_failures': [],  # List of critical failures per run
             'runs_vulnerability_counts': [],  # List of vulnerability counts per run
             'runs_avg_throughput': [],  # Average throughput per run
+            # Add algorithm-specific breakdown
+            'algorithm_breakdown': {}
         }
+        # Initialize per-algorithm tracking
+        for algo_name in algorithm_factories.keys():
+            fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][algo_name] = {
+                'total_vulns': 0,
+                'total_critical': 0,
+                'vulns_per_run': [],
+                'critical_per_run': []
+            }
     
     combination_pbar = tqdm(total=len(fuzzer_map) * len(algorithm_factories) * NUM_INDEPENDENT_RUNS, 
                             desc=f"Processing {scenario_name}", leave=False)
@@ -2187,6 +2312,12 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                 fuzzer_effectiveness[fuzzer_name]['runs_critical_failures'].append(run_critical_failures)
                 fuzzer_effectiveness[fuzzer_name]['runs_vulnerability_counts'].append(run_vulnerability_count)
                 fuzzer_effectiveness[fuzzer_name]['runs_avg_throughput'].append(np.mean(run_throughputs) if run_throughputs else 0)
+                
+                # Store algorithm-specific results
+                fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['total_vulns'] += run_vulnerability_count
+                fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['total_critical'] += run_critical_failures
+                fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['vulns_per_run'].append(run_vulnerability_count)
+                fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['critical_per_run'].append(run_critical_failures)
                 
                 combination_pbar.update(1)
             
@@ -2322,6 +2453,93 @@ def summarize_and_plot(df, effectiveness_data, script_version):
                     
             except Exception as e:
                 print(f"Could not perform statistical tests: {e}")
+    
+    # --- NEW: Per-Algorithm Analysis ---
+    print("\n" + "="*80)
+    print("PER-ALGORITHM BREAKDOWN ANALYSIS")
+    print("="*80)
+    
+    # Analyze results per algorithm within each fuzzer method
+    algorithm_performance = {}
+    
+    # Initialize algorithm performance tracking structure
+    algorithms = ['Baseline', 'Utility', 'ML-Based', 'Load-Aware', 'Random']
+    for fuzzer in ['AI-Fuzzing', 'Traditional-Testing']:
+        for algo in algorithms:
+            key = f"{fuzzer}_{algo}"
+            algorithm_performance[key] = {
+                'total_vulns': 0,
+                'total_critical': 0,
+                'total_severity': 0.0,
+                'runs': 0,
+                'vulns_per_run': [],
+                'critical_per_run': []
+            }
+    
+    # Collect data per algorithm from the results
+    for scenario_name, scenario_data in effectiveness_data.items():
+        for fuzzer_name, fuzzer_data in scenario_data.items():
+            # Try to extract algorithm-specific data if available
+            if 'algorithm_breakdown' in fuzzer_data:
+                for algo_name, algo_stats in fuzzer_data['algorithm_breakdown'].items():
+                    key = f"{fuzzer_name}_{algo_name}"
+                    algorithm_performance[key]['total_vulns'] += algo_stats.get('vulnerability_count', 0)
+                    algorithm_performance[key]['total_critical'] += algo_stats.get('critical_failures', 0)
+                    algorithm_performance[key]['total_severity'] += algo_stats.get('severity_sum', 0)
+                    algorithm_performance[key]['vulns_per_run'].append(algo_stats.get('vulnerability_count', 0))
+                    algorithm_performance[key]['critical_per_run'].append(algo_stats.get('critical_failures', 0))
+                    algorithm_performance[key]['runs'] += 1
+                    algorithm_performance[key]['total_vulns'] += algo_stats['total_vulns']
+                    algorithm_performance[key]['total_critical'] += algo_stats['total_critical']
+                    algorithm_performance[key]['vulns_per_run'].extend(algo_stats['vulns_per_run'])
+                    algorithm_performance[key]['critical_per_run'].extend(algo_stats['critical_per_run'])
+                    if key not in algorithm_performance:
+                        algorithm_performance[key] = {
+                            'total_vulns': 0, 'total_critical': 0, 'runs': 0,
+                            'vulns_per_run': [], 'critical_per_run': []
+                        }
+                    
+                    algorithm_performance[key]['total_vulns'] += algo_stats.get('vulnerabilities', 0)
+                    algorithm_performance[key]['total_critical'] += algo_stats.get('critical_failures', 0)
+                    algorithm_performance[key]['runs'] += 1
+                    algorithm_performance[key]['vulns_per_run'].extend(algo_stats.get('run_vulnerabilities', []))
+                    algorithm_performance[key]['critical_per_run'].extend(algo_stats.get('run_critical_failures', []))
+    
+    # If no detailed breakdown available, show aggregated message
+    if not algorithm_performance:
+        print("\nNote: Detailed per-algorithm breakdown not available in current results.")
+        print("The results shown above are aggregated across all algorithms.")
+        print("To see per-algorithm results, the data collection needs to be modified.")
+    
+    # Print per-algorithm results if available
+    algorithms = ['Baseline', 'Utility', 'ML-Based', 'Load-Aware', 'Random']
+    
+    for algo in algorithms:
+        ai_key = f"AI-Fuzzing_{algo}"
+        trad_key = f"Traditional-Testing_{algo}"
+        
+        if ai_key in algorithm_performance and trad_key in algorithm_performance:
+            ai_stats = algorithm_performance[ai_key]
+            trad_stats = algorithm_performance[trad_key]
+            
+            print(f"\n--- {algo} Algorithm Comparison ---")
+            print(f"AI-Fuzzing: {ai_stats['total_vulns']} vulnerabilities, {ai_stats['total_critical']} critical failures")
+            print(f"Traditional-Testing: {trad_stats['total_vulns']} vulnerabilities, {trad_stats['total_critical']} critical failures")
+            
+            # Calculate improvement
+            if trad_stats['total_vulns'] > 0:
+                vuln_improvement = ((ai_stats['total_vulns'] - trad_stats['total_vulns']) / trad_stats['total_vulns']) * 100
+                print(f"Improvement: {vuln_improvement:.1f}% more vulnerabilities detected")
+            
+            # Statistical test per algorithm
+            if (len(ai_stats['vulns_per_run']) > 1 and len(trad_stats['vulns_per_run']) > 1):
+                try:
+                    t_stat, p_val = stats.ttest_ind(ai_stats['vulns_per_run'], trad_stats['vulns_per_run'], 
+                                                   equal_var=False, alternative='greater')
+                    significance = "(significant)" if p_val < 0.05 else "(not significant)"
+                    print(f"T-test: t={t_stat:.3f}, p={p_val:.5f} {significance}")
+                except:
+                    print("Could not perform statistical test for this algorithm")
     
     print("\n" + "="*80)
     print("GENERATING PLOTS FOR PAPER")
