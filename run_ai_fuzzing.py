@@ -2156,6 +2156,8 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     
     results_list = []
     fuzzer_effectiveness = {}
+    # Computational complexity tracking for each algorithm
+    computational_stats = {}
     
     # Initialize fuzzer_effectiveness with nested dictionaries to track results by run and algorithm
     for fuzzer_name in fuzzer_map.keys():
@@ -2188,6 +2190,9 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
     
     for fuzzer_name, fuzzer_factory in fuzzer_map.items():
         for actual_algo_name, algo_factory in algorithm_factories.items():
+            # Track fitness evaluations and runtime for each algorithm/fuzzer combination
+            key = f"{fuzzer_name}_{actual_algo_name}"
+            computational_stats[key] = {'fitness_evaluations': 0, 'total_time': 0.0}
             # Run multiple independent runs with different random seeds
             for run_id in range(NUM_INDEPENDENT_RUNS):
                 # Set different random seed for each run to ensure independence
@@ -2218,41 +2223,37 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                 
                 iter_pbar = tqdm(range(SIMULATION_ITERATIONS), 
                                 desc=f" {fuzzer_name}+{actual_algo_name} Run {run_id+1} Iterations", leave=False)
+                # Start timer for this run
+                run_start_time = time.time()
+                fitness_evals_this_run = 0
                 for iteration in iter_pbar:
                     try:
                         current_assignments = ts_instance.prev_assignments.copy()
-                        
+                        # Each iteration is a fitness evaluation for the current algorithm
+                        fitness_evals_this_run += 1
+                        # ...existing code...
                         if hasattr(fuzzer, 'generate_inputs'):
                             fuzzed_inputs = fuzzer.generate_inputs(dt=1.0)
                         else:
                             load_modifier = np.random.uniform(-0.05, 0.05, shared_env_state.num_cells)
                             position_modifier_2d = np.random.uniform(-3, 3, (num_ues, 2))
                             fuzzed_inputs = np.concatenate([load_modifier, position_modifier_2d.flatten()])
-
                         load_modifier = fuzzed_inputs[:shared_env_state.num_cells]
-                        # Ensure fuzzed_inputs is numpy array before reshape
                         position_data = np.array(fuzzed_inputs[shared_env_state.num_cells:])
                         position_modifier_2d = position_data.reshape(num_ues, 2)
                         pos_modifier_3d_np = np.hstack([position_modifier_2d, np.zeros((num_ues, 1))])
-
                         shared_env_state.cell_loads = np.clip(shared_env_state.cell_loads + load_modifier, 0, 1)
-                        # The fuzzer now operates on a single state, so we apply perturbations to the first slice of the batch
                         current_loc = shared_env_state.ue_loc.read_value()
                         new_loc = tf.tensor_scatter_nd_update(current_loc, [[0]], [current_loc[0] + tf.constant(pos_modifier_3d_np, dtype=tf.float32)])
                         shared_env_state.ue_loc.assign(new_loc)
-                        
                         shared_env_state.update_ue_positions_and_velocities(dt=1.0)
-                        
                         rsrp, sinr, cell_loads_eval, priorities_eval = shared_env_state.compute_metrics()
                         new_assignments = ts_instance.assign_ues(rsrp, sinr, cell_loads_eval, priorities_eval, dt=1.0)
                         new_assignments = np.clip(new_assignments, 0, shared_env_state.num_cells - 1)
-                        
                         shared_env_state.update_cell_loads(new_assignments)
                         oracle_metrics = oracle.evaluate(rsrp, sinr, new_assignments, shared_env_state.cell_loads, priorities_eval, current_assignments)
-                        
                         assigned_sinr_list = [sinr[i, new_assignments[i]] if 0 <= new_assignments[i] < shared_env_state.num_cells else np.nan for i in range(num_ues)]
                         assigned_sinr_np_finite = np.array([s for s in assigned_sinr_list if pd.notna(s)])
-                        
                         assigned_sinr_linear = 10**(np.array(assigned_sinr_np_finite, dtype=np.float32) / 10.0)
                         user_throughputs_bps = calculate_estimated_shannon_throughput_tf(assigned_sinr_linear, BANDWIDTH).numpy()
                         user_throughputs_mbps = user_throughputs_bps / 1e6
@@ -2312,16 +2313,27 @@ def run_simulation(scenario_name, num_ues, initial_load, max_speed, scenario_typ
                 fuzzer_effectiveness[fuzzer_name]['runs_critical_failures'].append(run_critical_failures)
                 fuzzer_effectiveness[fuzzer_name]['runs_vulnerability_counts'].append(run_vulnerability_count)
                 fuzzer_effectiveness[fuzzer_name]['runs_avg_throughput'].append(np.mean(run_throughputs) if run_throughputs else 0)
-                
                 # Store algorithm-specific results
                 fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['total_vulns'] += run_vulnerability_count
                 fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['total_critical'] += run_critical_failures
                 fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['vulns_per_run'].append(run_vulnerability_count)
                 fuzzer_effectiveness[fuzzer_name]['algorithm_breakdown'][actual_algo_name]['critical_per_run'].append(run_critical_failures)
-                
+                # Track computational cost for this run
+                run_time = time.time() - run_start_time
+                computational_stats[key]['fitness_evaluations'] += fitness_evals_this_run
+                computational_stats[key]['total_time'] += run_time
                 combination_pbar.update(1)
             
     combination_pbar.close()
+    # Print computational cost summary for each algorithm
+    print("\n--- Computational Complexity Summary ---")
+    for key, stats in computational_stats.items():
+        print(f"Algorithm: {key}")
+        print(f"  Total Fitness Evaluations: {stats['fitness_evaluations']}")
+        print(f"  Total Runtime (seconds): {stats['total_time']:.2f}")
+        print("  # Each fitness evaluation corresponds to one simulation of the network for a given configuration.")
+        print("  # NSGA-II-based fuzzing typically requires more evaluations and longer runtime than random testing.")
+    print("--- End Computational Complexity ---\n")
     return results_list, fuzzer_effectiveness
 
 def summarize_and_plot(df, effectiveness_data, script_version):

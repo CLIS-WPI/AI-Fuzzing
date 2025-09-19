@@ -1,7 +1,8 @@
-08730269 0.01312629 0.03901091]        0  
-19      50      8       [0.3376     0.06302567 0.26973948]      [0.08622204 0.01386113 0.04040829]        0  
-                                                                 Completed Congestion Crisis scenario with 1500 results             
-Running: Congestion Crisis: 100%|█| 6/6 [1:04:36<00:00, 646.16s/it
+  # NSGA-II-based fuzzing typically requires more evaluations and longer runtime than random testing.
+--- End Computational Complexity ---
+
+Completed Congestion Crisis scenario with 1500 results
+Running: Congestion Crisis: 100%|█| 6/6 [1:05:04<00:00, 650.78s/it
 
 --- Finalizing script: Saving results... ---
 
@@ -13,79 +14,83 @@ COMPREHENSIVE STATISTICAL ANALYSIS - AI FUZZING vs TRADITIONAL TESTING
 
 OVERALL FUZZER EFFECTIVENESS ACROSS ALL SCENARIOS:
   AI-Fuzzing:
-    Total Vulnerabilities Found: 8042
-    Total CRITICAL FAILURES Found: 37
-    Average Vulnerability Severity: 3.05
+    Total Vulnerabilities Found: 8151
+    Total CRITICAL FAILURES Found: 54
+    Average Vulnerability Severity: 3.10
   Traditional-Testing:
-    Total Vulnerabilities Found: 6069
-    Total CRITICAL FAILURES Found: 85
-    Average Vulnerability Severity: 2.17
+    Total Vulnerabilities Found: 6072
+    Total CRITICAL FAILURES Found: 92
+    Average Vulnerability Severity: 2.18
 
 PER-RUN STATISTICS (averaged over all scenarios):
   AI-Fuzzing:
-    Average Critical Failures per Run: 0.12 ± 0.44
-    Average Vulnerabilities per Run: 26.81 ± 8.19
+    Average Critical Failures per Run: 0.18 ± 0.58
+    Average Vulnerabilities per Run: 27.17 ± 8.24
   Traditional-Testing:
-    Average Critical Failures per Run: 0.28 ± 0.85
-    Average Vulnerabilities per Run: 20.23 ± 10.15
+    Average Critical Failures per Run: 0.31 ± 0.92
+    Average Vulnerabilities per Run: 20.24 ± 10.09
 
 STATISTICAL SIGNIFICANCE TESTS:
 T-TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):
-  T-statistic: -2.898, P-value: 0.99803
+  T-statistic: -2.010, P-value: 0.97754
   Result: No statistically significant difference found in critical failures.
 
 T-TEST for TOTAL VULNERABILITIES (One-sided: AI Fuzzing > Traditional Testing):
-  T-statistic: 8.721, P-value: 0.00000
+  T-statistic: 9.202, P-value: 0.00000
   Result: AI Fuzzing found a statistically significant GREATER number of vulnerabilities (p = 0.00000).
 
 MANN-WHITNEY U TEST for CRITICAL FAILURES (One-sided: AI Fuzzing > Traditional Testing):
-  U-statistic: 42991.000, P-value: 0.96138
+  U-statistic: 43777.000, P-value: 0.84503
   Result: No statistically significant difference found in critical failures (non-parametric test).
 
 95% CONFIDENCE INTERVALS for CRITICAL FAILURES:
-  AI Fuzzing: 0.12 [0.07, 0.17]
-  Traditional Testing: 0.28 [0.19, 0.38]
+  AI Fuzzing: 0.18 [0.11, 0.25]
+  Traditional Testing: 0.31 [0.20, 0.41]
 
-EFFECT SIZE (Cohen's d): -0.237
-  Interpretation: Medium effect size
+EFFECT SIZE (Cohen's d): -0.164
+  Interpretation: Small effect size
 
 ================================================================================
 PER-ALGORITHM BREAKDOWN ANALYSIS
 ================================================================================
 
 --- Baseline Algorithm Comparison ---
-AI-Fuzzing: 1744 vulnerabilities, 0 critical failures
-Traditional-Testing: 887 vulnerabilities, 0 critical failures
-Improvement: 96.6% more vulnerabilities detected
-T-test: t=8.549, p=0.00000 (significant)
+AI-Fuzzing: 1815 vulnerabilities, 0 critical failures
+Traditional-Testing: 907 vulnerabilities, 0 critical failures
+Improvement: 100.1% more vulnerabilities detected
+T-test: t=8.809, p=0.00000 (significant)
 
 --- Utility Algorithm Comparison ---
-AI-Fuzzing: 1484 vulnerabilities, 13 critical failures
-Traditional-Testing: 949 vulnerabilities, 0 critical failures
-Improvement: 56.4% more vulnerabilities detected
-T-test: t=6.374, p=0.00000 (significant)
+AI-Fuzzing: 1539 vulnerabilities, 21 critical failures
+Traditional-Testing: 938 vulnerabilities, 0 critical failures
+Improvement: 64.1% more vulnerabilities detected
+T-test: t=7.210, p=0.00000 (significant)
 
 --- ML-Based Algorithm Comparison ---
-AI-Fuzzing: 2311 vulnerabilities, 23 critical failures
-Traditional-Testing: 2367 vulnerabilities, 85 critical failures
-Improvement: -2.4% more vulnerabilities detected
-T-test: t=-0.419, p=0.66200 (not significant)
+AI-Fuzzing: 2311 vulnerabilities, 32 critical failures
+Traditional-Testing: 2364 vulnerabilities, 92 critical failures
+Improvement: -2.2% more vulnerabilities detected
+T-test: t=-0.397, p=0.65402 (not significant)
 
 --- Load-Aware Algorithm Comparison ---
-AI-Fuzzing: 1265 vulnerabilities, 1 critical failures
-Traditional-Testing: 940 vulnerabilities, 0 critical failures
-Improvement: 34.6% more vulnerabilities detected
-T-test: t=4.564, p=0.00001 (significant)
+AI-Fuzzing: 1249 vulnerabilities, 1 critical failures
+Traditional-Testing: 937 vulnerabilities, 0 critical failures
+Improvement: 33.3% more vulnerabilities detected
+T-test: t=4.328, p=0.00002 (significant)
 
 --- Random Algorithm Comparison ---
-AI-Fuzzing: 1238 vulnerabilities, 0 critical failures
+AI-Fuzzing: 1237 vulnerabilities, 0 critical failures
 Traditional-Testing: 926 vulnerabilities, 0 critical failures
-Improvement: 33.7% more vulnerabilities detected
-T-test: t=4.270, p=0.00002 (significant)
+Improvement: 33.6% more vulnerabilities detected
+T-test: t=4.383, p=0.00001 (significant)
 
 ================================================================================
 GENERATING PLOTS FOR PAPER
 ================================================================================
 Consolidated 2x2 plot saved to plots_v28_strategic_fuzzing/ai_fuzzing_vs_traditional_testing.pdf
 
---- Simulation Finished in 4853.12 seconds ---
+--- Simulation Finished in 4883.66 seconds ---
+root@ff46c6f458c1:/workspace# ^C
+root@ff46c6f458c1:/workspace# ^C
+root@ff46c6f458c1:/workspace# ^C
+root@ff46c6f458c1:/workspace# 
