@@ -119,12 +119,11 @@ def create_combined_plots(df, output_dir):
     # Calculate statistics matching the paper
     fuzzer_types = ['Traditional-Testing', 'AI-Fuzzing']
     
-    # Initialize arrays for the correct statistics
+    # Initialize arrays for the correct statistics (use SD for error bars)
     means = [20.24, 27.17]  # From paper Table II
-    stds = [10.09, 8.24]    # From paper Table II
-    # Correct calculation: 10 runs × 6 scenarios = 60
+    stds = [10.09, 8.24]    # Use SD for error bars
     ns = [60, 60]  # 10 runs × 6 scenarios
-    cis = [1.96 * std / np.sqrt(n) for std, n in zip(stds, ns)]
+    # For value labels, show SD not CI
     
     # For critical failures subplot (if needed)
     critical_means = [0.31, 0.18]  # Traditional vs AI from paper
@@ -152,10 +151,11 @@ def create_combined_plots(df, output_dir):
     colors = ['#2ecc71', '#e74c3c']  # Green for Traditional, Red for AI
     display_names = ['Traditional Testing', 'AI Fuzzing']
     
+    # Use SD for error bars (not SEM)
     bars = ax1.bar(x_pos, means, yerr=stds, capsize=10,
                   color=colors, alpha=0.8, width=0.6,
                   edgecolor='black', linewidth=1.5,
-                  error_kw={'elinewidth': 2, 'capthick': 2})
+                  error_kw={'elinewidth': 4, 'capthick': 4, 'ecolor': 'black'})
     
     # Customize plot
     ax1.set_xticks(x_pos)
@@ -171,11 +171,11 @@ def create_combined_plots(df, output_dir):
     # Adjust y-axis limits
     ax1.set_ylim(0, 45)
     
-    # Add value labels on bars
+    # Add value labels on bars (show SD)
     for i, bar in enumerate(bars):
         height = bar.get_height()
         ax1.text(bar.get_x() + bar.get_width()/2., height + stds[i],
-                f'{means[i]:.1f}±{cis[i]:.1f}\nn={ns[i]}',
+                f'{means[i]:.2f}±{stds[i]:.2f}\nSD',
                 ha='center', va='bottom', fontsize=18, fontweight='bold')
     
     # Add statistical significance annotation
