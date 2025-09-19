@@ -2,7 +2,6 @@
 ![AI-Fuzzing for 5G Traffic Steering Wireless Robustness](header.png)
 This repository provides an implementation of AI-driven fuzzing for vulnerability assessment in 5G traffic steering algorithms. The framework leverages NSGA-II multi-objective optimization to systematically discover subtle and critical failures in network control logic, outperforming traditional random testing baselines.
 
-
 ## Citation
 If you use this code or results in academic work, please cite:
 
