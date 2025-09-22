@@ -409,8 +409,15 @@ def create_plot4_performance_across_scenarios(df, output_dir):
     
     comparison_data = df[df['fuzzer_type'].isin(['AI-Fuzzing', 'Traditional-Testing'])]
     
-    # Focus on 3 main scenarios for clarity
-    main_scenarios = ['Stable Mobility', 'Load Imbalance', 'Congestion Crisis']
+    # Use all 6 scenarios for comprehensive analysis
+    main_scenarios = [
+        'Stable Mobility',
+        'Stable High Load',
+        'Load Imbalance',
+        'Coverage Hole',
+        'High Interference',
+        'Congestion Crisis'
+    ]
     scenario_data = comparison_data[comparison_data['scenario'].isin(main_scenarios)]
     
     fig, ax = plt.subplots(figsize=(16, 10), facecolor='white')
@@ -497,13 +504,13 @@ def create_plot4_performance_across_scenarios(df, output_dir):
     for i, (bar, mean_val, ci_val, n_val) in enumerate(zip(bars1, traditional_means, traditional_cis, traditional_ns)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + ci_val,
-               f'{mean_val:.1f}±{ci_val:.1f}\n(n={n_val})', 
+               f'{mean_val:.1f}±{ci_val:.1f}', 
                ha='center', va='bottom', fontweight='bold', fontsize=20)
 
     for i, (bar, mean_val, ci_val, n_val) in enumerate(zip(bars2, ai_means, ai_cis, ai_ns)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + ci_val,
-               f'{mean_val:.1f}±{ci_val:.1f}\n(n={n_val})', 
+               f'{mean_val:.1f}±{ci_val:.1f}', 
                ha='center', va='bottom', fontweight='bold', fontsize=20)
     
     ax.set_ylabel('Mean Vulnerabilities per Run', fontsize=20, fontweight='bold')
