@@ -1,7 +1,7 @@
+
 import pandas as pd
 import numpy as np
-from scipy.stats import ttest_ind
-from statsmodels.stats.power import tt_ind_solve_power
+from scipy.stats import ttest_ind, norm
 
 
 # Load CSV
@@ -26,6 +26,7 @@ df['run'] = df.groupby(['scenario', 'algorithm', 'fuzzer_type']).cumcount() // 1
 per_run_df = df.groupby(['scenario', 'algorithm', 'fuzzer_type', 'run'])['vulnerability_count'].sum().reset_index()
 per_run_df = per_run_df.rename(columns={'vulnerability_count': 'total_vulnerabilities_per_run'})
 
+
 # Filter per method
 ai_per_run = per_run_df[per_run_df['fuzzer_type'] == 'AI-Fuzzing']['total_vulnerabilities_per_run']
 trad_per_run = per_run_df[per_run_df['fuzzer_type'] == 'Traditional-Testing']['total_vulnerabilities_per_run']
@@ -43,9 +44,14 @@ d = (mean_ai - mean_trad) / pooled_sd if pooled_sd > 0 else 0
 # t-test (two-sided by default)
 stat, pval = ttest_ind(ai_per_run, trad_per_run, equal_var=True)
 
-
-# Power analysis (two-sided, to match paper's t-test) with fixed ratio
-power = tt_ind_solve_power(effect_size=d, nobs1=n_ai, alpha=0.05, ratio=1.0, alternative='two-sided')
+# Power analysis (manual calculation for two-sided test)
+if d > 0 and n_ai > 0 and n_trad > 0:
+	z_alpha = norm.ppf(1 - 0.05/2)  # 1.96 for two-sided 0.05
+	z = d * np.sqrt(n_ai / 2)
+	power = 1 - norm.cdf(z_alpha - z)
+	print(f"Manual power estimate (approx): {power:.2f}")
+else:
+	power = np.nan
 
 print(f"AI-Fuzzing per-run: mean={mean_ai:.2f}, SD={std_ai:.2f}, n={n_ai}")
 print(f"Traditional per-run: mean={mean_trad:.2f}, SD={std_trad:.2f}, n={n_trad}")
