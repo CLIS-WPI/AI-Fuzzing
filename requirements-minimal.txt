@@ -14,3 +14,4 @@ deap
 # Optional: NetworkX for network visualization if needed
 networkx
 seaborn
+statsmodels
