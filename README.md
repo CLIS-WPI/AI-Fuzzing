@@ -29,7 +29,7 @@ To run in a reproducible containerized environment:
 2. Run `python3 regenerate_plots.py` to produce all essential publication figure
 
 ## Contributing
-Contributions are welcome! Please contact the project maintainer for access to the codebase or to discuss enhancements.
+Contributions are welcome! Please contact the project maintainer to discuss enhancements.
 
 ## License
 This project is licensed under the MIT License. See the `LICENSE` file for details (if applicable).
