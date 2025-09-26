@@ -558,6 +558,14 @@ def create_plot4_performance_across_scenarios(df, output_dir):
     print(f"   Average improvement: {np.mean(improvements):.1f}%")
     print(f"   P-values: {[f'{p:.4f}' for p in p_values]}")
 
+    # Print LaTeX table for Overleaf
+    print("\nLaTeX Table for Overleaf:")
+    print("\\begin{tabular}{lcccc}")
+    print("Scenario & Traditional & AI-Fuzzing & Improvement (\\%) & p-value \\ \\hline")
+    for i, scenario in enumerate(main_scenarios):
+        print(f"{scenario} & {traditional_means[i]:.2f} & {ai_means[i]:.2f} & {improvements[i]:.1f} & {p_values[i]:.4f} \\")
+    print("\\end{tabular}")
+
 def main():
     """Main function to generate all essential publication plots."""
     print("=== AI-Fuzzing Essential Plots Generator (CORRECTED) ===")
