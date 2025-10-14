@@ -1,8 +1,8 @@
-python3 power_analysis_from_csv.py
+python3 power_analysis_from_csv.py 
 CSV columns: ['scenario', 'iteration', 'fuzzer_type', 'algorithm', 'handover_count', 'handover_rate', 'vulnerability_count', 'vulnerabilities_list', 'jain_fairness_index', 'avg_sinr_db', 'sinr_5th_percentile_db', 'avg_throughput_mbps', 'throughput_5th_percentile_mbps', 'avg_transmission_time_ms', 'load_std', 'has_ping_pong', 'has_qoe_violation', 'has_unfairness', 'is_critical_failure']
 Data summary: count    9000.000000
-mean        1.580333
-std         0.944976
+mean        1.591000
+std         0.995906
 min         0.000000
 25%         1.000000
 50%         2.000000
@@ -72,9 +72,9 @@ Stable Mobility    Baseline    AI-Fuzzing             150
                                Traditional-Testing    150
 Name: vulnerability_count, dtype: int64
 Manual power estimate (approx): 1.00
-AI-Fuzzing per-run: mean=27.17, SD=8.25, n=300
-Traditional per-run: mean=20.24, SD=10.10, n=300
-Cohen's d: 0.751
+AI-Fuzzing per-run: mean=27.36, SD=8.60, n=300
+Traditional per-run: mean=20.37, SD=10.98, n=300
+Cohen's d: 0.708
 t-test p-value: 0.00000
 Estimated power (two-sided, alpha=0.05): 1.00
-root@b9fd89fafff5:/workspace# 
+root@87ff72d2e7e3:/workspace# 

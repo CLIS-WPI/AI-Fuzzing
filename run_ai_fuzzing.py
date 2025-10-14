@@ -123,7 +123,8 @@ FUZZER_POPULATION = 40  # Reduced for faster execution
 ENABLE_NSGA2_FUZZER = True
 
 ENABLE_TF_DEVICE_LOGGING = True
-SCRIPT_VERSION_NAME = "v28_strategic_fuzzing"
+SCRIPT_VERSION_NAME = "v29_realistic_threshold"  # Updated critical failure threshold
+
 
 # --- Helper Functions ---
 def safe_nanpercentile(data, percentile):
@@ -2038,7 +2039,7 @@ class Oracle:
         self.num_ues = num_ues
         self.num_cells = num_cells
         self.ping_pong_window = ping_pong_window
-        # MODIFICATION 2.1: Made ping-pong threshold stricter
+        # This detects oscillation in individual UEs; critical failures require multiple UEs
         self.ping_pong_threshold = ping_pong_threshold 
         self.qos_throughput_threshold_mbps = qos_throughput_threshold_mbps
         self.fairness_threshold = fairness_threshold
@@ -2109,8 +2110,7 @@ class Oracle:
         # This creates a more difficult optimization landscape that challenges simpler fuzzing methods
         is_critical_failure = (has_qoe_violation and 
                               has_unfairness and 
-                              (num_ping_pongs_detected_this_step > self.num_ues // 2))  # Changed from >5 to >half of all UEs
-        
+                              (num_ping_pongs_detected_this_step > self.num_ues // 3))  # # >3 UEs = ~7.5% threshold (realistic for 5G)        
         if is_critical_failure:
             vulnerabilities_found.append("CRITICAL FAILURE: Low QoE, High Unfairness, and System Instability Co-occurred")
 
