@@ -6,12 +6,14 @@ This repository provides an implementation of AI-driven fuzzing for vulnerabilit
 If you use this code or results in academic work, please cite:
 
 ```
-@article{YourLastName2025AIFuzzing,
-	title={AI-Fuzzing: Robust Vulnerability Analysis for 5G Traffic Steering},
-	author={Your Name and Coauthors},
-	journal={Journal/Conference Name},
-	year={2025},
-	note={Available at: https://github.com/CLIS-WPI/AI-Fuzzing}
+@misc{natanzi2026aidrivenfuzzingvulnerabilityassessment,
+      title={AI-Driven Fuzzing for Vulnerability Assessment of 5G Traffic Steering Algorithms}, 
+      author={Seyed Bagher Hashemi Natanzi and Hossein Mohammadi and Bo Tang and Vuk Marojevic},
+      year={2026},
+      eprint={2601.18690},
+      archivePrefix={arXiv},
+      primaryClass={eess.SP},
+      url={https://arxiv.org/abs/2601.18690}, 
 }
 ```
 To run in a reproducible containerized environment:
